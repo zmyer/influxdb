@@ -285,6 +285,10 @@ func (e *Engine) disableSnapshotCompactions() {
 // Path returns the path the engine was opened with.
 func (e *Engine) Path() string { return e.path }
 
+func (e *Engine) Measurement(name []byte) (*tsdb.Measurement, error) {
+	return e.index.Measurement(name)
+}
+
 func (e *Engine) MeasurementNamesByExpr(expr influxql.Expr) ([][]byte, error) {
 	return e.index.MeasurementNamesByExpr(expr)
 }
@@ -298,10 +302,6 @@ func (e *Engine) MeasurementFields(measurement string) *tsdb.MeasurementFields {
 	return e.fieldset.CreateFieldsIfNotExists(measurement)
 }
 
-func (e *Engine) SeriesN() (uint64, error) {
-	return e.index.SeriesN()
-}
-
 func (e *Engine) ForEachMeasurementSeriesByExpr(name []byte, condition influxql.Expr, fn func(tags models.Tags) error) error {
 	return e.index.ForEachMeasurementSeriesByExpr(name, condition, fn)
 }
@@ -312,6 +312,11 @@ func (e *Engine) MeasurementTagKeysByExpr(name []byte, expr influxql.Expr) (map[
 
 func (e *Engine) ForEachMeasurementTagKey(name []byte, fn func(key []byte) error) error {
 	return e.index.ForEachMeasurementTagKey(name, fn)
+}
+
+// SeriesN returns the unique number of series in the index.
+func (e *Engine) SeriesN() int64 {
+	return e.index.SeriesN()
 }
 
 func (e *Engine) SeriesSketches() (estimator.Sketch, estimator.Sketch, error) {

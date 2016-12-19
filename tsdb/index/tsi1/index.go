@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/influxdata/influxdb/pkg/estimator/hll"
+
 	"github.com/influxdata/influxdb/influxql"
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/pkg/bytesutil"
@@ -326,7 +328,26 @@ func (i *Index) ForEachMeasurementName(fn func(name []byte) error) error {
 	return nil
 }
 
-// MeasurementSeriesIterator returns an iterator over all series in the index.
+// Measurement returns a measurement by name.
+func (i *Index) Measurement(name []byte) (*tsdb.Measurement, error) {
+	if m := i.measurement(name); m != nil {
+		return tsdb.NewMeasurement(string(name)), nil
+	}
+	return nil, nil
+}
+
+// measurement returns a measurement by name.
+func (i *Index) measurement(name []byte) MeasurementElem {
+	for _, f := range i.files() {
+		if e := f.Measurement(name); e != nil && !e.Deleted() {
+			return e
+		}
+	}
+	return nil
+}
+
+// MeasurementSeriesIterator returns an iterator over all non-tombstoned series
+// in the index for the provided measurement.
 func (i *Index) MeasurementSeriesIterator(name []byte) SeriesIterator {
 	a := make([]SeriesIterator, 0, i.FileN())
 	for _, f := range i.files() {
@@ -600,8 +621,16 @@ func (i *Index) DropSeries(keys [][]byte) error {
 			return err
 		}
 
-		if err := i.logFiles[0].DeleteSeries([]byte(name), tags); err != nil {
+		mname := []byte(name)
+		if err := i.logFiles[0].DeleteSeries(mname, tags); err != nil {
 			return err
+		}
+
+		// Check if that was the last series for the measurement in the entire index.
+		if itr := i.MeasurementSeriesIterator(mname); itr == nil || itr.Next() == nil {
+			if err := i.logFiles[0].DeleteMeasurement(mname); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -609,23 +638,80 @@ func (i *Index) DropSeries(keys [][]byte) error {
 	return nil
 }
 
-func (i *Index) SeriesN() (n uint64, err error) {
-	// FIXME(edd): Use sketches.
+func (i *Index) sketches(nextSketches func(*IndexFile) (estimator.Sketch, estimator.Sketch)) (estimator.Sketch, estimator.Sketch, error) {
+	sketch, tsketch := hll.NewDefaultPlus(), hll.NewDefaultPlus()
 
-	// HACK(benbjohnson): Use first log file until edd adds sketches.
-	return i.logFiles[0].SeriesN(), nil
+	// Iterate over all the index files and merge all the sketches.
+	for _, f := range i.indexFiles {
+		s, t := nextSketches(f)
+		if err := sketch.Merge(s); err != nil {
+			return nil, nil, err
+		}
+
+		if err := tsketch.Merge(t); err != nil {
+			return nil, nil, err
+		}
+	}
+	return sketch, tsketch, nil
 }
 
+// SeriesN returns the number of unique non-tombstoned series in the index.
+// Since indexes are not shared across shards, the count returned by SeriesN
+// cannot be combined with other shard's results. If you need to count series
+// across indexes then use SeriesSketches and merge the results from other
+// indexes.
+func (i *Index) SeriesN() int64 {
+	var total int64
+	for _, f := range i.files() {
+		total += int64(f.SeriesN())
+	}
+	return total
+}
+
+// SeriesSketches returns the two sketches for the index by merging all
+// instances of the type sketch types in all the indexes files.
 func (i *Index) SeriesSketches() (estimator.Sketch, estimator.Sketch, error) {
-	//FIXME(edd)
-	return nil, nil, fmt.Errorf("SeriesSketches not implemented")
+	sketch, tsketch, err := i.sketches(func(i *IndexFile) (estimator.Sketch, estimator.Sketch) {
+		return i.sblk.sketch, i.sblk.tsketch
+	})
 
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Merge in any current log file sketches.
+	for _, f := range i.logFiles {
+		if err := sketch.Merge(f.sSketch); err != nil {
+			return nil, nil, err
+		}
+		if err := tsketch.Merge(f.sTSketch); err != nil {
+			return nil, nil, err
+		}
+	}
+	return sketch, tsketch, err
 }
 
+// MeasurementsSketches returns the two sketches for the index by merging all
+// instances of the type sketch types in all the indexes files.
 func (i *Index) MeasurementsSketches() (estimator.Sketch, estimator.Sketch, error) {
-	//FIXME(edd)
-	return nil, nil, fmt.Errorf("MeasurementSketches not implemented")
+	sketch, tsketch, err := i.sketches(func(i *IndexFile) (estimator.Sketch, estimator.Sketch) {
+		return i.mblk.Sketch, i.mblk.TSketch
+	})
 
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Merge in any current log file sketches.
+	for _, f := range i.logFiles {
+		if err := sketch.Merge(f.mSketch); err != nil {
+			return nil, nil, err
+		}
+		if err := tsketch.Merge(f.mTSketch); err != nil {
+			return nil, nil, err
+		}
+	}
+	return sketch, tsketch, err
 }
 
 // Dereference is a nop.
@@ -1412,7 +1498,7 @@ type compactNotify struct {
 type File interface {
 	Measurement(name []byte) MeasurementElem
 	Series(name []byte, tags models.Tags) SeriesElem
-
+	SeriesN() uint64
 	TagKeyIterator(name []byte) TagKeyIterator
 
 	TagValue(name, key, value []byte) TagValueElem

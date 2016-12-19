@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"io"
 	"sort"
+
+	"github.com/influxdata/influxdb/models"
+	"github.com/influxdata/influxdb/pkg/estimator/hll"
 )
 
 // IndexFiles represents a layered set of index files.
@@ -129,12 +132,29 @@ func (p *IndexFiles) WriteTo(w io.Writer) (n int64, err error) {
 
 func (p *IndexFiles) writeSeriesBlockTo(w io.Writer, info *indexCompactInfo, n *int64) error {
 	itr := p.SeriesIterator()
+	sw := NewSeriesBlockWriter()
+
+	// As the index files are merged together, it's possible that series were
+	// added, removed and then added again over time. Since sketches cannot have
+	// values removed from them, the series would be in both the resulting
+	// series and tombstoned series sketches. So that a series only appears in
+	// one of the sketches, we rebuild some fresh sketches during the
+	// compaction.
+	//
+	// We update these sketches below as we iterate through the series in these
+	// index files.
+	sw.Sketch, sw.TSketch = hll.NewDefaultPlus(), hll.NewDefaultPlus()
 
 	// Write all series.
-	sw := NewSeriesBlockWriter()
 	for e := itr.Next(); e != nil; e = itr.Next() {
 		if err := sw.Add(e.Name(), e.Tags()); err != nil {
 			return err
+		}
+
+		if e.Deleted() {
+			sw.TSketch.Add(models.MakeKey(e.Name(), e.Tags()))
+		} else {
+			sw.Sketch.Add(models.MakeKey(e.Name(), e.Tags()))
 		}
 	}
 
@@ -216,6 +236,22 @@ func (p *IndexFiles) writeTagsetTo(w io.Writer, name []byte, info *indexCompactI
 func (p *IndexFiles) writeMeasurementBlockTo(w io.Writer, info *indexCompactInfo, n *int64) error {
 	mw := NewMeasurementBlockWriter()
 
+	// As the index files are merged together, it's possible that measurements
+	// were added, removed and then added again over time. Since sketches cannot
+	// have values removed from them, the measurements would be in both the
+	// resulting measurements and tombstoned measurements sketches. So that a
+	// measurements only appears in one of the sketches, we rebuild some fresh
+	// sketches during the compaction.
+	mw.Sketch, mw.TSketch = hll.NewDefaultPlus(), hll.NewDefaultPlus()
+	itr := p.MeasurementIterator()
+	for e := itr.Next(); e != nil; e = itr.Next() {
+		if e.Deleted() {
+			mw.TSketch.Add(e.Name())
+		} else {
+			mw.Sketch.Add(e.Name())
+		}
+	}
+
 	// Add measurement data.
 	for _, name := range info.names {
 		// Look-up series ids.
@@ -234,6 +270,22 @@ func (p *IndexFiles) writeMeasurementBlockTo(w io.Writer, info *indexCompactInfo
 		pos := info.tagSets[string(name)]
 		mw.Add(name, pos.offset, pos.size, seriesIDs)
 	}
+
+	// Generate merged sketches to write out.
+	sketch, tsketch := hll.NewDefaultPlus(), hll.NewDefaultPlus()
+
+	// merge all the sketches in the index files together.
+	for _, idx := range *p {
+		if err := sketch.Merge(idx.mblk.Sketch); err != nil {
+			return err
+		}
+		if err := tsketch.Merge(idx.mblk.TSketch); err != nil {
+			return err
+		}
+	}
+
+	// Set the merged sketches on the measurement block writer.
+	mw.Sketch, mw.TSketch = sketch, tsketch
 
 	// Write data to writer.
 	nn, err := mw.WriteTo(w)

@@ -28,6 +28,9 @@ import (
 // Current version of HLL implementation.
 const version uint8 = 1
 
+// DefaultPrecision is the default precision.
+const DefaultPrecision = 16
+
 // Plus implements the Hyperloglog++ algorithm, described in the following
 // paper: http://static.googleusercontent.com/media/research.google.com/en//pubs/archive/40671.pdf
 //
@@ -84,6 +87,15 @@ func NewPlus(p uint8) (*Plus, error) {
 	}
 
 	return hll, nil
+}
+
+// NewDefaultPlus creates a new Plus with the default precision.
+func NewDefaultPlus() *Plus {
+	p, err := NewPlus(DefaultPrecision)
+	if err != nil {
+		panic(err)
+	}
+	return p
 }
 
 // MustNewPlus returns a new Plus with precision p. Panic on error.

@@ -43,9 +43,6 @@ type Store struct {
 
 	path string
 
-	// shared per-database indexes, only if using "inmem".
-	indexes map[string]interface{}
-
 	// shards is a map of shard IDs to the associated Shard.
 	shards map[uint64]*Shard
 
@@ -66,7 +63,6 @@ func NewStore(path string) *Store {
 	return &Store{
 		databases:     make(map[string]struct{}),
 		path:          path,
-		indexes:       make(map[string]interface{}),
 		EngineOptions: NewEngineOptions(),
 		Logger:        log.New(os.Stderr, "[store] ", log.LstdFlags),
 		logOutput:     os.Stderr,

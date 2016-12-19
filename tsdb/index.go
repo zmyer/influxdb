@@ -15,6 +15,7 @@ type Index interface {
 	Open() error
 	Close() error
 
+	Measurement(name []byte) (*Measurement, error)
 	MeasurementNamesByExpr(expr influxql.Expr) ([][]byte, error)
 	MeasurementNamesByRegex(re *regexp.Regexp) ([][]byte, error)
 	DropMeasurement(name []byte) error
@@ -23,9 +24,9 @@ type Index interface {
 	CreateSeriesIfNotExists(key, name []byte, tags models.Tags) error
 	DropSeries(keys [][]byte) error
 
-	SeriesN() (uint64, error)
 	SeriesSketches() (estimator.Sketch, estimator.Sketch, error)
 	MeasurementsSketches() (estimator.Sketch, estimator.Sketch, error)
+	SeriesN() int64
 
 	Dereference(b []byte)
 

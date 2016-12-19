@@ -11,6 +11,8 @@ import (
 
 	"github.com/influxdata/influxdb/influxql"
 	"github.com/influxdata/influxdb/models"
+	"github.com/influxdata/influxdb/pkg/estimator"
+	"github.com/influxdata/influxdb/pkg/estimator/hll"
 	"github.com/influxdata/influxdb/pkg/rhh"
 )
 
@@ -20,16 +22,14 @@ var ErrSeriesOverflow = errors.New("series overflow")
 // Series list field size constants.
 const (
 	// Series list trailer field sizes.
-	TermListOffsetSize   = 8
-	TermListSizeSize     = 8
-	SeriesDataOffsetSize = 8
-	SeriesDataSizeSize   = 8
-
 	SeriesBlockTrailerSize = 0 +
 		8 + 8 + // term data offset/size
 		8 + 8 + // series data offset/size
 		8 + 8 + // term index offset/size
 		8 + 8 + // series index offset/size
+		8 + 8 + // series sketch offset/size
+		8 + 8 + // tombstone series sketch offset/size
+		8 + 8 + // series count and tombstone count
 		0
 
 	// Other field sizes
@@ -58,6 +58,14 @@ type SeriesBlock struct {
 	seriesData   []byte
 	seriesIndex  []byte
 	seriesIndexN uint32
+
+	// Series counts.
+	seriesN    int64
+	tombstoneN int64
+
+	// Series block sketch and tombstone sketch for cardinality
+	// estimation.
+	sketch, tsketch estimator.Sketch
 }
 
 // Series returns a series element.
@@ -101,8 +109,6 @@ func (blk *SeriesBlock) Series(name []byte, tags models.Tags) SeriesElem {
 			return nil
 		}
 	}
-
-	return nil
 }
 
 // SeriesOffset returns offset of the encoded series key.
@@ -269,8 +275,6 @@ func (blk *SeriesBlock) EncodeTerm(v []byte) uint32 {
 			return 0
 		}
 	}
-
-	return 0
 }
 
 // TermCount returns the number of terms within the dictionary.
@@ -321,6 +325,21 @@ func (blk *SeriesBlock) UnmarshalBinary(data []byte) error {
 	blk.seriesIndex = blk.seriesIndex[:t.Series.Index.Size]
 	blk.seriesIndexN = binary.BigEndian.Uint32(blk.seriesIndex[:4])
 	blk.seriesIndex = blk.seriesIndex[4:]
+
+	// Initialise sketches. We're currently using HLL+.
+	var s, ts = hll.NewDefaultPlus(), hll.NewDefaultPlus()
+	if err := s.UnmarshalBinary(data[t.Sketch.Offset:][:t.Sketch.Size]); err != nil {
+		return err
+	}
+	blk.sketch = s
+
+	if err := ts.UnmarshalBinary(data[t.TSketch.Offset:][:t.TSketch.Size]); err != nil {
+		return err
+	}
+	blk.tsketch = ts
+
+	// Set the series and tombstone counts
+	blk.seriesN, blk.tombstoneN = t.SeriesN, t.TombstoneN
 
 	return nil
 }
@@ -403,6 +422,10 @@ type SeriesBlockWriter struct {
 
 	// Term list is available after writer has been written.
 	termList *TermList
+
+	// Series sketch and tombstoned series sketch. These must be
+	// set before calling WriteTo.
+	Sketch, TSketch estimator.Sketch
 }
 
 // NewSeriesBlockWriter returns a new instance of SeriesBlockWriter.
@@ -449,6 +472,20 @@ func (sw *SeriesBlockWriter) append(name []byte, tags models.Tags, deleted bool)
 // WriteTo computes the dictionary encoding of the series and writes to w.
 func (sw *SeriesBlockWriter) WriteTo(w io.Writer) (n int64, err error) {
 	var t SeriesBlockTrailer
+	for _, s := range sw.series {
+		if s.deleted {
+			t.TombstoneN++
+		} else {
+			t.SeriesN++
+		}
+	}
+
+	// The sketches must be set before calling WriteTo.
+	if sw.Sketch == nil {
+		return 0, errors.New("series sketch not set")
+	} else if sw.TSketch == nil {
+		return 0, errors.New("series tombstone sketch not set")
+	}
 
 	terms := NewTermList(sw.terms)
 
@@ -483,6 +520,19 @@ func (sw *SeriesBlockWriter) WriteTo(w io.Writer) (n int64, err error) {
 		return n, err
 	}
 	t.Series.Index.Size = n - t.Series.Index.Offset
+
+	// Write the sketches out.
+	t.Sketch.Offset = n
+	if err := writeSketchTo(w, sw.Sketch, &n); err != nil {
+		return n, err
+	}
+	t.Sketch.Size = n - t.Sketch.Offset
+
+	t.TSketch.Offset = n
+	if err := writeSketchTo(w, sw.TSketch, &n); err != nil {
+		return n, err
+	}
+	t.TSketch.Size = n - t.TSketch.Offset
 
 	// Write trailer.
 	nn, err = t.WriteTo(w)
@@ -637,7 +687,6 @@ func (sw *SeriesBlockWriter) writeSeriesIndexTo(w io.Writer, terms *TermList, n 
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -687,6 +736,14 @@ func ReadSeriesBlockTrailer(data []byte) SeriesBlockTrailer {
 	t.Series.Index.Offset, buf = int64(binary.BigEndian.Uint64(buf[0:8])), buf[8:]
 	t.Series.Index.Size, buf = int64(binary.BigEndian.Uint64(buf[0:8])), buf[8:]
 
+	// Read series sketch info.
+	t.Sketch.Offset, buf = int64(binary.BigEndian.Uint64(buf[0:8])), buf[8:]
+	t.Sketch.Size, buf = int64(binary.BigEndian.Uint64(buf[0:8])), buf[8:]
+
+	// Read tombstone series sketch info.
+	t.TSketch.Offset, buf = int64(binary.BigEndian.Uint64(buf[0:8])), buf[8:]
+	t.TSketch.Size, buf = int64(binary.BigEndian.Uint64(buf[0:8])), buf[8:]
+
 	return t
 }
 
@@ -713,6 +770,21 @@ type SeriesBlockTrailer struct {
 			Size   int64
 		}
 	}
+
+	// Offset and size of cardinality sketch for measurements.
+	Sketch struct {
+		Offset int64
+		Size   int64
+	}
+
+	// Offset and size of cardinality sketch for tombstoned measurements.
+	TSketch struct {
+		Offset int64
+		Size   int64
+	}
+
+	SeriesN    int64
+	TombstoneN int64
 }
 
 func (t SeriesBlockTrailer) WriteTo(w io.Writer) (n int64, err error) {
@@ -740,7 +812,25 @@ func (t SeriesBlockTrailer) WriteTo(w io.Writer) (n int64, err error) {
 		return n, err
 	}
 
-	return n, nil
+	// Write measurement sketch info.
+	if err := writeUint64To(w, uint64(t.Sketch.Offset), &n); err != nil {
+		return n, err
+	} else if err := writeUint64To(w, uint64(t.Sketch.Size), &n); err != nil {
+		return n, err
+	}
+
+	// Write tombstone measurement sketch info.
+	if err := writeUint64To(w, uint64(t.TSketch.Offset), &n); err != nil {
+		return n, err
+	} else if err := writeUint64To(w, uint64(t.TSketch.Size), &n); err != nil {
+		return n, err
+	}
+
+	// Write series and tombstone count.
+	if err := writeUint64To(w, uint64(t.SeriesN), &n); err != nil {
+		return n, err
+	}
+	return n, writeUint64To(w, uint64(t.TombstoneN), &n)
 }
 
 type serie struct {

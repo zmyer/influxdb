@@ -44,10 +44,11 @@ type Engine interface {
 	CreateSeriesIfNotExists(key, name []byte, tags models.Tags) error
 	DeleteSeriesRange(keys [][]byte, min, max int64) error
 
-	SeriesN() (uint64, error)
 	SeriesSketches() (estimator.Sketch, estimator.Sketch, error)
 	MeasurementsSketches() (estimator.Sketch, estimator.Sketch, error)
+	SeriesN() int64
 
+	Measurement(name []byte) (*Measurement, error)
 	MeasurementNamesByExpr(expr influxql.Expr) ([][]byte, error)
 	MeasurementNamesByRegex(re *regexp.Regexp) ([][]byte, error)
 	MeasurementFields(measurement string) *MeasurementFields
