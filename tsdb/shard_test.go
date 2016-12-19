@@ -19,6 +19,7 @@ import (
 	"github.com/influxdata/influxdb/tsdb"
 	_ "github.com/influxdata/influxdb/tsdb/engine"
 	_ "github.com/influxdata/influxdb/tsdb/index"
+	"github.com/influxdata/influxdb/tsdb/index/inmem"
 )
 
 // DefaultPrecision is the precision used by the MustWritePointsString() function.
@@ -32,6 +33,7 @@ func TestShardWriteAndIndex(t *testing.T) {
 
 	opts := tsdb.NewEngineOptions()
 	opts.Config.WALDir = filepath.Join(tmpDir, "wal")
+	opts.InmemIndex = inmem.NewIndex()
 
 	sh := tsdb.NewShard(1, tmpShard, tmpWal, opts)
 
@@ -157,6 +159,7 @@ func TestShard_MaxTagValuesLimit(t *testing.T) {
 	opts := tsdb.NewEngineOptions()
 	opts.Config.WALDir = filepath.Join(tmpDir, "wal")
 	opts.Config.MaxValuesPerTag = 1000
+	opts.InmemIndex = inmem.NewIndex()
 
 	sh := tsdb.NewShard(1, tmpShard, tmpWal, opts)
 
@@ -208,6 +211,7 @@ func TestWriteTimeTag(t *testing.T) {
 
 	opts := tsdb.NewEngineOptions()
 	opts.Config.WALDir = filepath.Join(tmpDir, "wal")
+	opts.InmemIndex = inmem.NewIndex()
 
 	sh := tsdb.NewShard(1, tmpShard, tmpWal, opts)
 	if err := sh.Open(); err != nil {
@@ -263,6 +267,7 @@ func TestWriteTimeField(t *testing.T) {
 
 	opts := tsdb.NewEngineOptions()
 	opts.Config.WALDir = filepath.Join(tmpDir, "wal")
+	opts.InmemIndex = inmem.NewIndex()
 
 	sh := tsdb.NewShard(1, tmpShard, tmpWal, opts)
 	if err := sh.Open(); err != nil {
@@ -294,6 +299,7 @@ func TestShardWriteAddNewField(t *testing.T) {
 
 	opts := tsdb.NewEngineOptions()
 	opts.Config.WALDir = filepath.Join(tmpDir, "wal")
+	opts.InmemIndex = inmem.NewIndex()
 
 	sh := tsdb.NewShard(1, tmpShard, tmpWal, opts)
 	if err := sh.Open(); err != nil {
@@ -343,6 +349,7 @@ func TestShard_WritePoints_FieldConflictConcurrent(t *testing.T) {
 
 	opts := tsdb.NewEngineOptions()
 	opts.Config.WALDir = filepath.Join(tmpDir, "wal")
+	opts.InmemIndex = inmem.NewIndex()
 
 	sh := tsdb.NewShard(1, tmpShard, tmpWal, opts)
 	if err := sh.Open(); err != nil {
@@ -413,6 +420,7 @@ func TestShard_Close_RemoveIndex(t *testing.T) {
 
 	opts := tsdb.NewEngineOptions()
 	opts.Config.WALDir = filepath.Join(tmpDir, "wal")
+	opts.InmemIndex = inmem.NewIndex()
 
 	sh := tsdb.NewShard(1, tmpShard, tmpWal, opts)
 	if err := sh.Open(); err != nil {
@@ -897,6 +905,7 @@ func NewShard() *Shard {
 	// Build engine options.
 	opt := tsdb.NewEngineOptions()
 	opt.Config.WALDir = filepath.Join(path, "wal")
+	opt.InmemIndex = inmem.NewIndex()
 
 	return &Shard{
 		Shard: tsdb.NewShard(0,

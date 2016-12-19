@@ -147,3 +147,6 @@ func NewEngineOptions() EngineOptions {
 		Config:        NewConfig(),
 	}
 }
+
+// NewInmemIndex returns a new "inmem" index type.
+var NewInmemIndex func(name string) (interface{}, error)
