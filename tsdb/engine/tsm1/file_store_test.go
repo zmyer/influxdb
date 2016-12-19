@@ -153,6 +153,9 @@ func TestFileStore_SeekToAsc_Duplicate(t *testing.T) {
 
 	c.Next()
 	values, err = c.ReadFloatBlock(&buf)
+	if err != nil {
+		t.Fatalf("unexpected error reading values: %v", err)
+	}
 	exp = nil
 	if got, exp := len(values), len(exp); got != exp {
 		t.Fatalf("value length mismatch: got %v, exp %v", got, exp)
@@ -533,6 +536,9 @@ func TestFileStore_SeekToAsc_OverlapMinFloat(t *testing.T) {
 
 	c.Next()
 	values, err = c.ReadFloatBlock(&buf)
+	if err != nil {
+		t.Fatalf("unexpected error reading values: %v", err)
+	}
 	exp = nil
 	if got, exp := len(values), len(exp); got != exp {
 		t.Fatalf("value length mismatch: got %v, exp %v", got, exp)
@@ -608,6 +614,9 @@ func TestFileStore_SeekToAsc_OverlapMinInteger(t *testing.T) {
 
 	c.Next()
 	values, err = c.ReadIntegerBlock(&buf)
+	if err != nil {
+		t.Fatalf("unexpected error reading values: %v", err)
+	}
 	exp = nil
 	if got, exp := len(values), len(exp); got != exp {
 		t.Fatalf("value length mismatch: got %v, exp %v", got, exp)
@@ -683,6 +692,9 @@ func TestFileStore_SeekToAsc_OverlapMinBoolean(t *testing.T) {
 
 	c.Next()
 	values, err = c.ReadBooleanBlock(&buf)
+	if err != nil {
+		t.Fatalf("unexpected error reading values: %v", err)
+	}
 	exp = nil
 	if got, exp := len(values), len(exp); got != exp {
 		t.Fatalf("value length mismatch: got %v, exp %v", got, exp)
@@ -758,6 +770,9 @@ func TestFileStore_SeekToAsc_OverlapMinString(t *testing.T) {
 
 	c.Next()
 	values, err = c.ReadStringBlock(&buf)
+	if err != nil {
+		t.Fatalf("unexpected error reading values: %v", err)
+	}
 	exp = nil
 	if got, exp := len(values), len(exp); got != exp {
 		t.Fatalf("value length mismatch: got %v, exp %v", got, exp)
@@ -2070,11 +2085,17 @@ func TestFileStore_Replace(t *testing.T) {
 	cur.Next()
 	buf := make([]tsm1.FloatValue, 10)
 	values, err := cur.ReadFloatBlock(&buf)
+	if err != nil {
+		t.Fatalf("unexpected error reading values: %v", err)
+	}
 	if got, exp := len(values), 1; got != exp {
 		t.Fatalf("value len mismatch: got %v, exp %v", got, exp)
 	}
 	cur.Next()
 	values, err = cur.ReadFloatBlock(&buf)
+	if err != nil {
+		t.Fatalf("unexpected error reading values: %v", err)
+	}
 	if got, exp := len(values), 1; got != exp {
 		t.Fatalf("value len mismatch: got %v, exp %v", got, exp)
 	}
@@ -2082,6 +2103,9 @@ func TestFileStore_Replace(t *testing.T) {
 	// No more blocks for this cursor
 	cur.Next()
 	values, err = cur.ReadFloatBlock(&buf)
+	if err != nil {
+		t.Fatalf("unexpected error reading values: %v", err)
+	}
 	if got, exp := len(values), 0; got != exp {
 		t.Fatalf("value len mismatch: got %v, exp %v", got, exp)
 	}

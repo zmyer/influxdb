@@ -95,7 +95,9 @@ func upgradeNodeFile(path string) error {
 		}
 		return err
 	}
-	err = json.Unmarshal(pb, &peers)
+	if err := json.Unmarshal(pb, &peers); err != nil {
+		return err
+	}
 	if len(peers) > 1 {
 		return fmt.Errorf("to upgrade a cluster, please contact support at influxdata")
 	}

@@ -679,6 +679,9 @@ func TestApplyTemplateField(t *testing.T) {
 	}
 
 	measurement, _, field, err := p.ApplyTemplate("current.users.logged_in")
+	if err != nil {
+		t.Fatalf("error applying template: %v", err)
+	}
 
 	if measurement != "current_users" {
 		t.Errorf("Parser.ApplyTemplate unexpected result. got %s, exp %s",
