@@ -1,3 +1,4 @@
+// Package cli contains the logic of the influx command line client.
 package cli // import "github.com/influxdata/influxdb/cmd/influx/cli"
 
 import (
@@ -27,14 +28,10 @@ import (
 	"github.com/peterh/liner"
 )
 
-const (
-	noTokenMsg = "Visit https://enterprise.influxdata.com to register for updates, InfluxDB server management, and monitoring.\n"
-)
-
 // ErrBlankCommand is returned when a parsed command is empty.
 var ErrBlankCommand = errors.New("empty input")
 
-// CommandLine holds CLI configuration and state
+// CommandLine holds CLI configuration and state.
 type CommandLine struct {
 	Line            *liner.State
 	Host            string
@@ -61,7 +58,7 @@ type CommandLine struct {
 	ImporterConfig v8.Config     // Importer configuration options.
 }
 
-// New returns an instance of CommandLine
+// New returns an instance of CommandLine with the specified client version.
 func New(version string) *CommandLine {
 	return &CommandLine{
 		ClientVersion: version,
@@ -70,7 +67,7 @@ func New(version string) *CommandLine {
 	}
 }
 
-// Run executes the CLI
+// Run executes the CLI.
 func (c *CommandLine) Run() error {
 	hasTTY := c.ForceTTY || terminal.IsTerminal(int(os.Stdin.Fd()))
 
@@ -110,9 +107,26 @@ func (c *CommandLine) Run() error {
 	}
 
 	if err := c.Connect(""); err != nil {
-		return fmt.Errorf(
-			"Failed to connect to %s: %s\nPlease check your connection settings and ensure 'influxd' is running.",
-			c.Client.Addr(), err.Error())
+		msg := "Please check your connection settings and ensure 'influxd' is running."
+		if !c.Ssl && strings.Contains(err.Error(), "malformed HTTP response") {
+			// Attempt to connect with SSL and disable secure SSL for this test.
+			c.Ssl = true
+			unsafeSsl := c.ClientConfig.UnsafeSsl
+			c.ClientConfig.UnsafeSsl = true
+			if err := c.Connect(""); err == nil {
+				msg = "Please use the -ssl flag to connect using SSL."
+			}
+			c.Ssl = false
+			c.ClientConfig.UnsafeSsl = unsafeSsl
+		} else if c.Ssl && !c.ClientConfig.UnsafeSsl && strings.Contains(err.Error(), "certificate is valid for") {
+			// Attempt to connect with an insecure connection just to see if it works.
+			c.ClientConfig.UnsafeSsl = true
+			if err := c.Connect(""); err == nil {
+				msg = "You may use -unsafeSsl to connect anyway, but the SSL connection will not be secure."
+			}
+			c.ClientConfig.UnsafeSsl = false
+		}
+		return fmt.Errorf("Failed to connect to %s: %s\n%s", c.Client.Addr(), err.Error(), msg)
 	}
 
 	// Modify precision.
@@ -169,13 +183,6 @@ func (c *CommandLine) Run() error {
 
 	c.Line.SetMultiLineMode(true)
 
-	token, err := c.DatabaseToken()
-	if err != nil {
-		return fmt.Errorf("Failed to check token: %s", err.Error())
-	}
-	if token == "" {
-		fmt.Printf(noTokenMsg)
-	}
 	fmt.Printf("Connected to %s version %s\n", c.Client.Addr(), c.ServerVersion)
 
 	c.Version()
@@ -221,7 +228,8 @@ func (c *CommandLine) mainLoop() error {
 	}
 }
 
-// ParseCommand parses an instruction and calls related method, if any
+// ParseCommand parses an instruction and calls the related method
+// or executes the command as a query against InfluxDB.
 func (c *CommandLine) ParseCommand(cmd string) error {
 	lcmd := strings.TrimSpace(strings.ToLower(cmd))
 	tokens := strings.Fields(lcmd)
@@ -270,7 +278,7 @@ func (c *CommandLine) ParseCommand(cmd string) error {
 	return ErrBlankCommand
 }
 
-// Connect connects client to a server
+// Connect connects to a server.
 func (c *CommandLine) Connect(cmd string) error {
 	// Remove the "connect" keyword if it exists
 	addr := strings.TrimSpace(strings.Replace(cmd, "connect", "", -1))
@@ -297,7 +305,7 @@ func (c *CommandLine) Connect(cmd string) error {
 
 	_, v, err := c.Client.Ping()
 	if err != nil {
-		return fmt.Errorf("Failed to connect to %s: %v\n", c.Client.Addr(), err)
+		return err
 	}
 	c.ServerVersion = v
 
@@ -312,7 +320,7 @@ func (c *CommandLine) Connect(cmd string) error {
 	return nil
 }
 
-// SetAuth sets client authentication credentials
+// SetAuth sets client authentication credentials.
 func (c *CommandLine) SetAuth(cmd string) {
 	// If they pass in the entire command, we should parse it
 	// auth <username> <password>
@@ -482,7 +490,7 @@ func (c *CommandLine) retentionPolicyExists(db, rp string) bool {
 	return true
 }
 
-// SetPrecision sets client precision
+// SetPrecision sets client precision.
 func (c *CommandLine) SetPrecision(cmd string) {
 	// normalize cmd
 	cmd = strings.ToLower(cmd)
@@ -502,7 +510,7 @@ func (c *CommandLine) SetPrecision(cmd string) {
 	}
 }
 
-// SetFormat sets output format
+// SetFormat sets output format.
 func (c *CommandLine) SetFormat(cmd string) {
 	// Remove the "format" keyword if it exists
 	cmd = strings.TrimSpace(strings.Replace(cmd, "format", "", -1))
@@ -517,7 +525,7 @@ func (c *CommandLine) SetFormat(cmd string) {
 	}
 }
 
-// SetWriteConsistency sets cluster consistency level
+// SetWriteConsistency sets write consistency level.
 func (c *CommandLine) SetWriteConsistency(cmd string) {
 	// Remove the "consistency" keyword if it exists
 	cmd = strings.TrimSpace(strings.Replace(cmd, "consistency", "", -1))
@@ -630,7 +638,7 @@ func (c *CommandLine) parseInsert(stmt string) (*client.BatchPoints, error) {
 	}, nil
 }
 
-// Insert runs an INSERT statement
+// Insert runs an INSERT statement.
 func (c *CommandLine) Insert(stmt string) error {
 	bp, err := c.parseInsert(stmt)
 	if err != nil {
@@ -657,7 +665,7 @@ func (c *CommandLine) query(query string) client.Query {
 	}
 }
 
-// ExecuteQuery runs any query statement
+// ExecuteQuery runs any query statement.
 func (c *CommandLine) ExecuteQuery(query string) error {
 	// If we have a retention policy, we need to rewrite the statement sources
 	if c.RetentionPolicy != "" {
@@ -699,27 +707,7 @@ func (c *CommandLine) ExecuteQuery(query string) error {
 	return nil
 }
 
-// DatabaseToken retrieves database token
-func (c *CommandLine) DatabaseToken() (string, error) {
-	response, err := c.Client.Query(c.query("SHOW DIAGNOSTICS for 'registration'"))
-	if err != nil {
-		return "", err
-	}
-
-	if response.Error() != nil || len(response.Results) == 0 || len(response.Results[0].Series) == 0 {
-		return "", nil
-	}
-
-	// Look for position of "token" column.
-	for i, s := range (*response).Results[0].Series[0].Columns {
-		if s == "token" {
-			return (*response).Results[0].Series[0].Values[0][i].(string), nil
-		}
-	}
-	return "", nil
-}
-
-// FormatResponse formats output to previsouly chosen format
+// FormatResponse formats output to the previously chosen format.
 func (c *CommandLine) FormatResponse(response *client.Response, w io.Writer) {
 	switch c.Format {
 	case "json":
@@ -803,9 +791,7 @@ func (c *CommandLine) formatResults(result client.Result, separator string) []st
 			}
 		}
 
-		for _, column := range row.Columns {
-			columnNames = append(columnNames, column)
-		}
+		columnNames = append(columnNames, row.Columns...)
 
 		// Output a line separator if we have more than one set or results and format is column
 		if i > 0 && c.Format == "column" {
@@ -874,7 +860,7 @@ func interfaceToString(v interface{}) string {
 	}
 }
 
-// Settings prints current settings
+// Settings prints current settings.
 func (c *CommandLine) Settings() {
 	w := new(tabwriter.Writer)
 	w.Init(os.Stdout, 0, 1, 1, ' ', 0)
@@ -992,7 +978,7 @@ func (c *CommandLine) gopher() {
 `)
 }
 
-// Version prints CLI version
+// Version prints the CLI version.
 func (c *CommandLine) Version() {
 	fmt.Println("InfluxDB shell version:", c.ClientVersion)
 }

@@ -1,3 +1,4 @@
+// Command influxd is the InfluxDB server.
 package main
 
 import (
@@ -15,7 +16,7 @@ import (
 	"github.com/influxdata/influxdb/cmd/influxd/help"
 	"github.com/influxdata/influxdb/cmd/influxd/restore"
 	"github.com/influxdata/influxdb/cmd/influxd/run"
-	"go.uber.org/zap"
+	"github.com/uber-go/zap"
 )
 
 // These variables are populated via the Go linker.
@@ -94,13 +95,9 @@ func (m *Main) Run(args ...string) error {
 		m.Logger.Info("Listening for signals")
 
 		// Block until one of the signals above is received
-		select {
-		case <-signalCh:
-			m.Logger.Info("Signal received, initializing clean shutdown...")
-			go func() {
-				cmd.Close()
-			}()
-		}
+		<-signalCh
+		m.Logger.Info("Signal received, initializing clean shutdown...")
+		go cmd.Close()
 
 		// Block again until another signal is received, a shutdown timeout elapses,
 		// or the Command is gracefully closed

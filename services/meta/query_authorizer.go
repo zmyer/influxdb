@@ -6,10 +6,12 @@ import (
 	"github.com/influxdata/influxdb/influxql"
 )
 
+// QueryAuthorizer determines whether a user is authorized to execute a given query.
 type QueryAuthorizer struct {
 	Client *Client
 }
 
+// NewQueryAuthorizer returns a new instance of QueryAuthorizer.
 func NewQueryAuthorizer(c *Client) *QueryAuthorizer {
 	return &QueryAuthorizer{
 		Client: c,
@@ -80,7 +82,7 @@ func (a *QueryAuthorizer) AuthorizeQuery(u *UserInfo, query *influxql.Query, dat
 			if db == "" {
 				db = database
 			}
-			if !u.Authorize(p.Privilege, db) {
+			if !u.AuthorizeDatabase(p.Privilege, db) {
 				return &ErrAuthorize{
 					Query:    query,
 					User:     u.Name,

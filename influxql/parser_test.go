@@ -43,6 +43,29 @@ func TestParser_ParseQuery_Empty(t *testing.T) {
 	}
 }
 
+// Ensure the parser will skip comments.
+func TestParser_ParseQuery_SkipComments(t *testing.T) {
+	q, err := influxql.ParseQuery(`SELECT * FROM cpu; -- read from cpu database
+
+/* create continuous query */
+CREATE CONTINUOUS QUERY cq0 ON db0 BEGIN
+	SELECT mean(*) INTO db1..:MEASUREMENT FROM cpu GROUP BY time(5m)
+END;
+
+/* just a multline comment
+what is this doing here?
+**/
+
+-- should ignore the trailing multiline comment /*
+SELECT mean(value) FROM gpu;
+-- trailing comment at the end`)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	} else if len(q.Statements) != 3 {
+		t.Fatalf("unexpected statement count: %d", len(q.Statements))
+	}
+}
+
 // Ensure the parser can return an error from an malformed statement.
 func TestParser_ParseQuery_ParseError(t *testing.T) {
 	_, err := influxql.NewParser(strings.NewReader(`SELECT`)).ParseQuery()
@@ -1099,6 +1122,238 @@ func TestParser_ParseStatement(t *testing.T) {
 					Op:  influxql.GT,
 					LHS: &influxql.VarRef{Val: "value"},
 					RHS: &influxql.IntegerLiteral{Val: 2},
+				},
+			},
+		},
+
+		// SELECT statement with a subquery
+		{
+			s: `SELECT sum(derivative) FROM (SELECT derivative(value) FROM cpu GROUP BY host) WHERE time >= now() - 1d GROUP BY time(1h)`,
+			stmt: &influxql.SelectStatement{
+				Fields: []*influxql.Field{{
+					Expr: &influxql.Call{
+						Name: "sum",
+						Args: []influxql.Expr{
+							&influxql.VarRef{Val: "derivative"},
+						}},
+				}},
+				Dimensions: []*influxql.Dimension{{
+					Expr: &influxql.Call{
+						Name: "time",
+						Args: []influxql.Expr{
+							&influxql.DurationLiteral{Val: time.Hour},
+						},
+					},
+				}},
+				Sources: []influxql.Source{
+					&influxql.SubQuery{
+						Statement: &influxql.SelectStatement{
+							Fields: []*influxql.Field{{
+								Expr: &influxql.Call{
+									Name: "derivative",
+									Args: []influxql.Expr{
+										&influxql.VarRef{Val: "value"},
+									},
+								},
+							}},
+							Dimensions: []*influxql.Dimension{{
+								Expr: &influxql.VarRef{Val: "host"},
+							}},
+							Sources: []influxql.Source{
+								&influxql.Measurement{Name: "cpu"},
+							},
+						},
+					},
+				},
+				Condition: &influxql.BinaryExpr{
+					Op:  influxql.GTE,
+					LHS: &influxql.VarRef{Val: "time"},
+					RHS: &influxql.BinaryExpr{
+						Op:  influxql.SUB,
+						LHS: &influxql.Call{Name: "now"},
+						RHS: &influxql.DurationLiteral{Val: 24 * time.Hour},
+					},
+				},
+			},
+		},
+
+		{
+			s: `SELECT sum(mean) FROM (SELECT mean(value) FROM cpu GROUP BY time(1h)) WHERE time >= now() - 1d`,
+			stmt: &influxql.SelectStatement{
+				Fields: []*influxql.Field{{
+					Expr: &influxql.Call{
+						Name: "sum",
+						Args: []influxql.Expr{
+							&influxql.VarRef{Val: "mean"},
+						}},
+				}},
+				Sources: []influxql.Source{
+					&influxql.SubQuery{
+						Statement: &influxql.SelectStatement{
+							Fields: []*influxql.Field{{
+								Expr: &influxql.Call{
+									Name: "mean",
+									Args: []influxql.Expr{
+										&influxql.VarRef{Val: "value"},
+									},
+								},
+							}},
+							Dimensions: []*influxql.Dimension{{
+								Expr: &influxql.Call{
+									Name: "time",
+									Args: []influxql.Expr{
+										&influxql.DurationLiteral{Val: time.Hour},
+									},
+								},
+							}},
+							Sources: []influxql.Source{
+								&influxql.Measurement{Name: "cpu"},
+							},
+						},
+					},
+				},
+				Condition: &influxql.BinaryExpr{
+					Op:  influxql.GTE,
+					LHS: &influxql.VarRef{Val: "time"},
+					RHS: &influxql.BinaryExpr{
+						Op:  influxql.SUB,
+						LHS: &influxql.Call{Name: "now"},
+						RHS: &influxql.DurationLiteral{Val: 24 * time.Hour},
+					},
+				},
+			},
+		},
+
+		{
+			s: `SELECT sum(mean) FROM (SELECT mean(value) FROM cpu WHERE time >= now() - 1d GROUP BY time(1h))`,
+			stmt: &influxql.SelectStatement{
+				Fields: []*influxql.Field{{
+					Expr: &influxql.Call{
+						Name: "sum",
+						Args: []influxql.Expr{
+							&influxql.VarRef{Val: "mean"},
+						}},
+				}},
+				Sources: []influxql.Source{
+					&influxql.SubQuery{
+						Statement: &influxql.SelectStatement{
+							Fields: []*influxql.Field{{
+								Expr: &influxql.Call{
+									Name: "mean",
+									Args: []influxql.Expr{
+										&influxql.VarRef{Val: "value"},
+									},
+								},
+							}},
+							Dimensions: []*influxql.Dimension{{
+								Expr: &influxql.Call{
+									Name: "time",
+									Args: []influxql.Expr{
+										&influxql.DurationLiteral{Val: time.Hour},
+									},
+								},
+							}},
+							Condition: &influxql.BinaryExpr{
+								Op:  influxql.GTE,
+								LHS: &influxql.VarRef{Val: "time"},
+								RHS: &influxql.BinaryExpr{
+									Op:  influxql.SUB,
+									LHS: &influxql.Call{Name: "now"},
+									RHS: &influxql.DurationLiteral{Val: 24 * time.Hour},
+								},
+							},
+							Sources: []influxql.Source{
+								&influxql.Measurement{Name: "cpu"},
+							},
+						},
+					},
+				},
+			},
+		},
+
+		{
+			s: `SELECT sum(derivative) FROM (SELECT derivative(mean(value)) FROM cpu GROUP BY host) WHERE time >= now() - 1d GROUP BY time(1h)`,
+			stmt: &influxql.SelectStatement{
+				Fields: []*influxql.Field{{
+					Expr: &influxql.Call{
+						Name: "sum",
+						Args: []influxql.Expr{
+							&influxql.VarRef{Val: "derivative"},
+						}},
+				}},
+				Dimensions: []*influxql.Dimension{{
+					Expr: &influxql.Call{
+						Name: "time",
+						Args: []influxql.Expr{
+							&influxql.DurationLiteral{Val: time.Hour},
+						},
+					},
+				}},
+				Sources: []influxql.Source{
+					&influxql.SubQuery{
+						Statement: &influxql.SelectStatement{
+							Fields: []*influxql.Field{{
+								Expr: &influxql.Call{
+									Name: "derivative",
+									Args: []influxql.Expr{
+										&influxql.Call{
+											Name: "mean",
+											Args: []influxql.Expr{
+												&influxql.VarRef{Val: "value"},
+											},
+										},
+									},
+								},
+							}},
+							Dimensions: []*influxql.Dimension{{
+								Expr: &influxql.VarRef{Val: "host"},
+							}},
+							Sources: []influxql.Source{
+								&influxql.Measurement{Name: "cpu"},
+							},
+						},
+					},
+				},
+				Condition: &influxql.BinaryExpr{
+					Op:  influxql.GTE,
+					LHS: &influxql.VarRef{Val: "time"},
+					RHS: &influxql.BinaryExpr{
+						Op:  influxql.SUB,
+						LHS: &influxql.Call{Name: "now"},
+						RHS: &influxql.DurationLiteral{Val: 24 * time.Hour},
+					},
+				},
+			},
+		},
+
+		// select statements with intertwined comments
+		{
+			s: `SELECT "user" /*, system, idle */ FROM cpu`,
+			stmt: &influxql.SelectStatement{
+				IsRawQuery: true,
+				Fields: []*influxql.Field{
+					{Expr: &influxql.VarRef{Val: "user"}},
+				},
+				Sources: []influxql.Source{&influxql.Measurement{Name: "cpu"}},
+			},
+		},
+
+		{
+			s: `SELECT /foo\/*bar/ FROM /foo\/*bar*/ WHERE x = 1`,
+			stmt: &influxql.SelectStatement{
+				IsRawQuery: true,
+				Fields: []*influxql.Field{
+					{Expr: &influxql.RegexLiteral{Val: regexp.MustCompile(`foo/*bar`)}},
+				},
+				Sources: []influxql.Source{
+					&influxql.Measurement{
+						Regex: &influxql.RegexLiteral{Val: regexp.MustCompile(`foo/*bar*`)},
+					},
+				},
+				Condition: &influxql.BinaryExpr{
+					Op:  influxql.EQ,
+					LHS: &influxql.VarRef{Val: "x"},
+					RHS: &influxql.IntegerLiteral{Val: 1},
 				},
 			},
 		},
@@ -2289,6 +2544,7 @@ func TestParser_ParseStatement(t *testing.T) {
 		{s: `SELECT derivative(max()) FROM myseries where time < now() and time > now() - 1d group by time(1h)`, err: `invalid number of arguments for max, expected 1, got 0`},
 		{s: `SELECT derivative(percentile(value)) FROM myseries where time < now() and time > now() - 1d group by time(1h)`, err: `invalid number of arguments for percentile, expected 2, got 1`},
 		{s: `SELECT derivative(mean(value), 1h) FROM myseries where time < now() and time > now() - 1d`, err: `derivative aggregate requires a GROUP BY interval`},
+		{s: `SELECT min(derivative) FROM (SELECT derivative(mean(value), 1h) FROM myseries) where time < now() and time > now() - 1d`, err: `derivative aggregate requires a GROUP BY interval`},
 		{s: `SELECT non_negative_derivative(), field1 FROM myseries`, err: `mixing aggregate and non-aggregate queries is not supported`},
 		{s: `select non_negative_derivative() from myseries`, err: `invalid number of arguments for non_negative_derivative, expected at least 1 but no more than 2, got 0`},
 		{s: `select non_negative_derivative(mean(value), 1h, 3) from myseries`, err: `invalid number of arguments for non_negative_derivative, expected at least 1 but no more than 2, got 3`},
@@ -2342,6 +2598,7 @@ func TestParser_ParseStatement(t *testing.T) {
 		{s: `SELECT (count(foo + sum(bar))) FROM cpu`, err: `expected field argument in count()`},
 		{s: `SELECT sum(value) + count(foo + sum(bar)) FROM cpu`, err: `binary expressions cannot mix aggregates and raw fields`},
 		{s: `SELECT mean(value) FROM cpu FILL + value`, err: `fill must be a function call`},
+		{s: `SELECT sum(mean) FROM (SELECT mean(value) FROM cpu GROUP BY time(1h))`, err: `aggregate functions with GROUP BY time require a WHERE time clause`},
 		// See issues https://github.com/influxdata/influxdb/issues/1647
 		// and https://github.com/influxdata/influxdb/issues/4404
 		//{s: `DELETE`, err: `found EOF, expected FROM at line 1, char 8`},
@@ -2520,6 +2777,12 @@ func TestParser_ParseStatement(t *testing.T) {
 		// We are memoizing a field so for testing we need to...
 		if s, ok := tt.stmt.(*influxql.SelectStatement); ok {
 			s.GroupByInterval()
+			for _, source := range s.Sources {
+				switch source := source.(type) {
+				case *influxql.SubQuery:
+					source.Statement.GroupByInterval()
+				}
+			}
 		} else if st, ok := stmt.(*influxql.CreateContinuousQueryStatement); ok { // if it's a CQ, there is a non-exported field that gets memoized during parsing that needs to be set
 			if st != nil && st.Source != nil {
 				tt.stmt.(*influxql.CreateContinuousQueryStatement).Source.GroupByInterval()
@@ -2564,6 +2827,15 @@ func TestParser_ParseExpr(t *testing.T) {
 		// Primitives
 		{s: `100.0`, expr: &influxql.NumberLiteral{Val: 100}},
 		{s: `100`, expr: &influxql.IntegerLiteral{Val: 100}},
+		{s: `-100.0`, expr: &influxql.NumberLiteral{Val: -100}},
+		{s: `-100`, expr: &influxql.IntegerLiteral{Val: -100}},
+		{s: `100.`, expr: &influxql.NumberLiteral{Val: 100}},
+		{s: `-100.`, expr: &influxql.NumberLiteral{Val: -100}},
+		{s: `.23`, expr: &influxql.NumberLiteral{Val: 0.23}},
+		{s: `-.23`, expr: &influxql.NumberLiteral{Val: -0.23}},
+		{s: `1s`, expr: &influxql.DurationLiteral{Val: time.Second}},
+		{s: `-1s`, expr: &influxql.DurationLiteral{Val: -time.Second}},
+		{s: `-+1`, err: `found +, expected identifier, number, duration, ( at line 1, char 2`},
 		{s: `'foo bar'`, expr: &influxql.StringLiteral{Val: "foo bar"}},
 		{s: `true`, expr: &influxql.BooleanLiteral{Val: true}},
 		{s: `false`, expr: &influxql.BooleanLiteral{Val: false}},
@@ -2609,6 +2881,62 @@ func TestParser_ParseExpr(t *testing.T) {
 			},
 		},
 
+		// Binary expression with LHS precedence
+		{
+			s: `1 / 2 + 3`,
+			expr: &influxql.BinaryExpr{
+				Op: influxql.ADD,
+				LHS: &influxql.BinaryExpr{
+					Op:  influxql.DIV,
+					LHS: &influxql.IntegerLiteral{Val: 1},
+					RHS: &influxql.IntegerLiteral{Val: 2},
+				},
+				RHS: &influxql.IntegerLiteral{Val: 3},
+			},
+		},
+
+		// Binary expression with RHS precedence
+		{
+			s: `1 + 2 / 3`,
+			expr: &influxql.BinaryExpr{
+				Op:  influxql.ADD,
+				LHS: &influxql.IntegerLiteral{Val: 1},
+				RHS: &influxql.BinaryExpr{
+					Op:  influxql.DIV,
+					LHS: &influxql.IntegerLiteral{Val: 2},
+					RHS: &influxql.IntegerLiteral{Val: 3},
+				},
+			},
+		},
+
+		// Binary expression with LHS precedence
+		{
+			s: `1 % 2 + 3`,
+			expr: &influxql.BinaryExpr{
+				Op: influxql.ADD,
+				LHS: &influxql.BinaryExpr{
+					Op:  influxql.MOD,
+					LHS: &influxql.IntegerLiteral{Val: 1},
+					RHS: &influxql.IntegerLiteral{Val: 2},
+				},
+				RHS: &influxql.IntegerLiteral{Val: 3},
+			},
+		},
+
+		// Binary expression with RHS precedence
+		{
+			s: `1 + 2 % 3`,
+			expr: &influxql.BinaryExpr{
+				Op:  influxql.ADD,
+				LHS: &influxql.IntegerLiteral{Val: 1},
+				RHS: &influxql.BinaryExpr{
+					Op:  influxql.MOD,
+					LHS: &influxql.IntegerLiteral{Val: 2},
+					RHS: &influxql.IntegerLiteral{Val: 3},
+				},
+			},
+		},
+
 		// Binary expression with LHS paren group.
 		{
 			s: `(1 + 2) * 3`,
@@ -2635,6 +2963,78 @@ func TestParser_ParseExpr(t *testing.T) {
 					LHS: &influxql.IntegerLiteral{Val: 1},
 					RHS: &influxql.IntegerLiteral{Val: 2},
 				},
+				RHS: &influxql.IntegerLiteral{Val: 3},
+			},
+		},
+
+		// Addition and subtraction without whitespace.
+		{
+			s: `1+2-3`,
+			expr: &influxql.BinaryExpr{
+				Op: influxql.SUB,
+				LHS: &influxql.BinaryExpr{
+					Op:  influxql.ADD,
+					LHS: &influxql.IntegerLiteral{Val: 1},
+					RHS: &influxql.IntegerLiteral{Val: 2},
+				},
+				RHS: &influxql.IntegerLiteral{Val: 3},
+			},
+		},
+
+		{
+			s: `time>now()-5m`,
+			expr: &influxql.BinaryExpr{
+				Op:  influxql.GT,
+				LHS: &influxql.VarRef{Val: "time"},
+				RHS: &influxql.BinaryExpr{
+					Op:  influxql.SUB,
+					LHS: &influxql.Call{Name: "now"},
+					RHS: &influxql.DurationLiteral{Val: 5 * time.Minute},
+				},
+			},
+		},
+
+		// Simple unary expression.
+		{
+			s: `-value`,
+			expr: &influxql.BinaryExpr{
+				Op:  influxql.MUL,
+				LHS: &influxql.IntegerLiteral{Val: -1},
+				RHS: &influxql.VarRef{Val: "value"},
+			},
+		},
+
+		{
+			s: `-mean(value)`,
+			expr: &influxql.BinaryExpr{
+				Op:  influxql.MUL,
+				LHS: &influxql.IntegerLiteral{Val: -1},
+				RHS: &influxql.Call{
+					Name: "mean",
+					Args: []influxql.Expr{
+						&influxql.VarRef{Val: "value"}},
+				},
+			},
+		},
+
+		// Unary expressions with parenthesis.
+		{
+			s: `-(-4)`,
+			expr: &influxql.BinaryExpr{
+				Op:  influxql.MUL,
+				LHS: &influxql.IntegerLiteral{Val: -1},
+				RHS: &influxql.ParenExpr{
+					Expr: &influxql.IntegerLiteral{Val: -4},
+				},
+			},
+		},
+
+		// Multiplication with leading subtraction.
+		{
+			s: `-2 * 3`,
+			expr: &influxql.BinaryExpr{
+				Op:  influxql.MUL,
+				LHS: &influxql.IntegerLiteral{Val: -2},
 				RHS: &influxql.IntegerLiteral{Val: 3},
 			},
 		},
@@ -2711,6 +3111,12 @@ func TestParser_ParseExpr(t *testing.T) {
 			},
 		},
 
+		// Duration math with an invalid literal.
+		{
+			s:   `time > now() - 1y`,
+			err: `invalid duration`,
+		},
+
 		// Function call (empty)
 		{
 			s: `my_func()`,
@@ -2742,6 +3148,16 @@ func TestParser_ParseExpr(t *testing.T) {
 			t.Errorf("%d. %q: error mismatch:\n  exp=%s\n  got=%s\n\n", i, tt.s, tt.err, err)
 		} else if tt.err == "" && !reflect.DeepEqual(tt.expr, expr) {
 			t.Errorf("%d. %q\n\nexpr mismatch:\n\nexp=%#v\n\ngot=%#v\n\n", i, tt.s, tt.expr, expr)
+		} else if err == nil {
+			// Attempt to reparse the expr as a string and confirm it parses the same.
+			expr2, err := influxql.ParseExpr(expr.String())
+			if err != nil {
+				t.Errorf("%d. %q: unable to parse expr string: %s", i, expr.String(), err)
+			} else if !reflect.DeepEqual(tt.expr, expr2) {
+				t.Logf("\n# %s\nexp=%s\ngot=%s\n", tt.s, mustMarshalJSON(tt.expr), mustMarshalJSON(expr2))
+				t.Logf("\nSQL exp=%s\nSQL got=%s\n", tt.expr.String(), expr2.String())
+				t.Errorf("%d. %q\n\nexpr reparse mismatch:\n\nexp=%#v\n\ngot=%#v\n\n", i, tt.s, tt.expr, expr2)
+			}
 		}
 	}
 }

@@ -1,3 +1,4 @@
+// Package run is the run (default) subcommand for the influxd command.
 package run
 
 import (
@@ -12,7 +13,7 @@ import (
 	"strconv"
 	"time"
 
-	"go.uber.org/zap"
+	"github.com/uber-go/zap"
 )
 
 const logo = `
@@ -186,7 +187,7 @@ func (cmd *Command) writePIDFile(path string) error {
 }
 
 // ParseConfig parses the config at path.
-// Returns a demo configuration if path is blank.
+// It returns a demo configuration if path is blank.
 func (cmd *Command) ParseConfig(path string) (*Config, error) {
 	// Use demo configuration if no config path is specified.
 	if path == "" {
@@ -194,7 +195,7 @@ func (cmd *Command) ParseConfig(path string) (*Config, error) {
 		return NewDemoConfig()
 	}
 
-	cmd.Logger.Info(fmt.Sprintf("Using configuration at: %s\n", path))
+	cmd.Logger.Info(fmt.Sprintf("Using configuration at: %s", path))
 
 	config := NewConfig()
 	if err := config.FromTomlFile(path); err != nil {
@@ -204,7 +205,7 @@ func (cmd *Command) ParseConfig(path string) (*Config, error) {
 	return config, nil
 }
 
-var usage = `Runs the InfluxDB server.
+const usage = `Runs the InfluxDB server.
 
 Usage: influxd run [flags]
 

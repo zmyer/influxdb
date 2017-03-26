@@ -1,3 +1,5 @@
+// Package subscriber implements the subscriber service
+// to forward incoming data to remote services.
 package subscriber // import "github.com/influxdata/influxdb/services/subscriber"
 
 import (
@@ -12,7 +14,7 @@ import (
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/monitor"
 	"github.com/influxdata/influxdb/services/meta"
-	"go.uber.org/zap"
+	"github.com/uber-go/zap"
 )
 
 // Statistics for the Subscriber service.
@@ -29,7 +31,7 @@ type PointsWriter interface {
 	WritePoints(p *coordinator.WritePointsRequest) error
 }
 
-// unique set that identifies a given subscription
+// subEntry is a unique set that identifies a given subscription.
 type subEntry struct {
 	db   string
 	rp   string
@@ -73,6 +75,10 @@ func NewService(c Config) *Service {
 
 // Open starts the subscription service.
 func (s *Service) Open() error {
+	if !s.conf.Enabled {
+		return nil // Service disabled.
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.MetaClient == nil {
@@ -99,11 +105,16 @@ func (s *Service) Open() error {
 	return nil
 }
 
-// Close terminates the subscription service
-// Will panic if called multiple times or without first opening the service.
+// Close terminates the subscription service.
+// It will panic if called multiple times or without first opening the service.
 func (s *Service) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.closed {
+		return nil // Already closed.
+	}
+
 	s.closed = true
 
 	close(s.points)
@@ -114,6 +125,7 @@ func (s *Service) Close() error {
 	return nil
 }
 
+// WithLogger sets the logger on the service.
 func (s *Service) WithLogger(log zap.Logger) {
 	s.Logger = log.With(zap.String("service", "subscriber"))
 }
@@ -216,7 +228,7 @@ func (s *Service) Points() chan<- *coordinator.WritePointsRequest {
 	return s.points
 }
 
-// read points off chan and write them
+// run read points from the points channel and writes them to the subscriptions.
 func (s *Service) run() {
 	var wg sync.WaitGroup
 	s.subs = make(map[subEntry]chanWriter)
@@ -245,7 +257,7 @@ func (s *Service) run() {
 	}
 }
 
-// close closes the existing channel writers
+// close closes the existing channel writers.
 func (s *Service) close(wg *sync.WaitGroup) {
 	s.subMu.Lock()
 	defer s.subMu.Unlock()
@@ -320,7 +332,7 @@ func (s *Service) updateSubs(wg *sync.WaitGroup) {
 	}
 }
 
-// Creates a PointsWriter from the given URL
+// newPointsWriter returns a new PointsWriter from the given URL.
 func (s *Service) newPointsWriter(u url.URL) (PointsWriter, error) {
 	switch u.Scheme {
 	case "udp":
@@ -337,7 +349,7 @@ func (s *Service) newPointsWriter(u url.URL) (PointsWriter, error) {
 	}
 }
 
-// Sends WritePointsRequest to a PointsWriter received over a channel.
+// chanWriter sends WritePointsRequest to a PointsWriter received over a channel.
 type chanWriter struct {
 	writeRequests chan *coordinator.WritePointsRequest
 	pw            PointsWriter
@@ -346,7 +358,7 @@ type chanWriter struct {
 	logger        zap.Logger
 }
 
-// Close the chanWriter
+// Close closes the chanWriter.
 func (c chanWriter) Close() {
 	close(c.writeRequests)
 }
@@ -371,13 +383,14 @@ func (c chanWriter) Statistics(tags map[string]string) []models.Statistic {
 	return []models.Statistic{}
 }
 
-// BalanceMode sets what balance mode to use on a subscription.
-// valid options are currently ALL or ANY
+// BalanceMode specifies what balance mode to use on a subscription.
 type BalanceMode int
 
-//ALL is a Balance mode option
 const (
+	// ALL indicates to send writes to all subscriber destinations.
 	ALL BalanceMode = iota
+
+	// ANY indicates to send writes to a single subscriber destination, round robin.
 	ANY
 )
 

@@ -61,6 +61,55 @@ func TestDataType_String(t *testing.T) {
 	}
 }
 
+func TestDataType_LessThan(t *testing.T) {
+	for i, tt := range []struct {
+		typ   influxql.DataType
+		other influxql.DataType
+		exp   bool
+	}{
+		{typ: influxql.Unknown, other: influxql.Unknown, exp: true},
+		{typ: influxql.Unknown, other: influxql.Float, exp: true},
+		{typ: influxql.Unknown, other: influxql.Integer, exp: true},
+		{typ: influxql.Unknown, other: influxql.String, exp: true},
+		{typ: influxql.Unknown, other: influxql.Boolean, exp: true},
+		{typ: influxql.Unknown, other: influxql.Tag, exp: true},
+		{typ: influxql.Float, other: influxql.Unknown, exp: false},
+		{typ: influxql.Integer, other: influxql.Unknown, exp: false},
+		{typ: influxql.String, other: influxql.Unknown, exp: false},
+		{typ: influxql.Boolean, other: influxql.Unknown, exp: false},
+		{typ: influxql.Tag, other: influxql.Unknown, exp: false},
+		{typ: influxql.Float, other: influxql.Float, exp: false},
+		{typ: influxql.Float, other: influxql.Integer, exp: false},
+		{typ: influxql.Float, other: influxql.String, exp: false},
+		{typ: influxql.Float, other: influxql.Boolean, exp: false},
+		{typ: influxql.Float, other: influxql.Tag, exp: false},
+		{typ: influxql.Integer, other: influxql.Float, exp: true},
+		{typ: influxql.Integer, other: influxql.Integer, exp: false},
+		{typ: influxql.Integer, other: influxql.String, exp: false},
+		{typ: influxql.Integer, other: influxql.Boolean, exp: false},
+		{typ: influxql.Integer, other: influxql.Tag, exp: false},
+		{typ: influxql.String, other: influxql.Float, exp: true},
+		{typ: influxql.String, other: influxql.Integer, exp: true},
+		{typ: influxql.String, other: influxql.String, exp: false},
+		{typ: influxql.String, other: influxql.Boolean, exp: false},
+		{typ: influxql.String, other: influxql.Tag, exp: false},
+		{typ: influxql.Boolean, other: influxql.Float, exp: true},
+		{typ: influxql.Boolean, other: influxql.Integer, exp: true},
+		{typ: influxql.Boolean, other: influxql.String, exp: true},
+		{typ: influxql.Boolean, other: influxql.Boolean, exp: false},
+		{typ: influxql.Boolean, other: influxql.Tag, exp: false},
+		{typ: influxql.Tag, other: influxql.Float, exp: true},
+		{typ: influxql.Tag, other: influxql.Integer, exp: true},
+		{typ: influxql.Tag, other: influxql.String, exp: true},
+		{typ: influxql.Tag, other: influxql.Boolean, exp: true},
+		{typ: influxql.Tag, other: influxql.Tag, exp: false},
+	} {
+		if got, exp := tt.typ.LessThan(tt.other), tt.exp; got != exp {
+			t.Errorf("%d. %q.LessThan(%q) = %v; exp = %v", i, tt.typ, tt.other, got, exp)
+		}
+	}
+}
+
 // Ensure the SELECT statement can extract GROUP BY interval.
 func TestSelectStatement_GroupByInterval(t *testing.T) {
 	q := "SELECT sum(value) from foo  where time < now() GROUP BY time(10m)"
@@ -277,6 +326,7 @@ func TestSelectStatement_RewriteFields(t *testing.T) {
 	var tests = []struct {
 		stmt    string
 		rewrite string
+		err     string
 	}{
 		// No wildcards
 		{
@@ -407,6 +457,41 @@ func TestSelectStatement_RewriteFields(t *testing.T) {
 			stmt:    `SELECT mean(/1/) FROM cpu`,
 			rewrite: `SELECT mean(value1::float) AS mean_value1 FROM cpu`,
 		},
+
+		// Rewrite subquery
+		{
+			stmt:    `SELECT * FROM (SELECT mean(value1) FROM cpu GROUP BY host) GROUP BY *`,
+			rewrite: `SELECT mean::float FROM (SELECT mean(value1::float) FROM cpu GROUP BY host) GROUP BY host`,
+		},
+
+		// Invalid queries that can't be rewritten should return an error (to
+		// avoid a panic in the query engine)
+		{
+			stmt: `SELECT count(*) / 2 FROM cpu`,
+			err:  `unsupported expression with wildcard: count(*) / 2`,
+		},
+
+		{
+			stmt: `SELECT * / 2 FROM (SELECT count(*) FROM cpu)`,
+			err:  `unsupported expression with wildcard: * / 2`,
+		},
+
+		{
+			stmt: `SELECT count(/value/) / 2 FROM cpu`,
+			err:  `unsupported expression with regex field: count(/value/) / 2`,
+		},
+
+		// This one should be possible though since there's no wildcard in the
+		// binary expression.
+		{
+			stmt:    `SELECT value1 + value2, * FROM cpu`,
+			rewrite: `SELECT value1::float + value2::integer, host::tag, region::tag, value1::float, value2::integer FROM cpu`,
+		},
+
+		{
+			stmt:    `SELECT value1 + value2, /value/ FROM cpu`,
+			rewrite: `SELECT value1::float + value2::integer, value1::float, value2::integer FROM cpu`,
+		},
 	}
 
 	for i, tt := range tests {
@@ -417,9 +502,8 @@ func TestSelectStatement_RewriteFields(t *testing.T) {
 		}
 
 		var ic IteratorCreator
-		ic.FieldDimensionsFn = func(sources influxql.Sources) (fields map[string]influxql.DataType, dimensions map[string]struct{}, err error) {
-			source := sources[0].(*influxql.Measurement)
-			switch source.Name {
+		ic.FieldDimensionsFn = func(m *influxql.Measurement) (fields map[string]influxql.DataType, dimensions map[string]struct{}, err error) {
+			switch m.Name {
 			case "cpu":
 				fields = map[string]influxql.DataType{
 					"value1": influxql.Float,
@@ -442,12 +526,20 @@ func TestSelectStatement_RewriteFields(t *testing.T) {
 
 		// Rewrite statement.
 		rw, err := stmt.(*influxql.SelectStatement).RewriteFields(&ic)
-		if err != nil {
-			t.Errorf("%d. %q: error: %s", i, tt.stmt, err)
-		} else if rw == nil {
-			t.Errorf("%d. %q: unexpected nil statement", i, tt.stmt)
-		} else if rw := rw.String(); tt.rewrite != rw {
-			t.Errorf("%d. %q: unexpected rewrite:\n\nexp=%s\n\ngot=%s\n\n", i, tt.stmt, tt.rewrite, rw)
+		if tt.err != "" {
+			if err != nil && err.Error() != tt.err {
+				t.Errorf("%d. %q: unexpected error: %s != %s", i, tt.stmt, err.Error(), tt.err)
+			} else if err == nil {
+				t.Errorf("%d. %q: expected error", i, tt.stmt)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("%d. %q: error: %s", i, tt.stmt, err)
+			} else if rw == nil && tt.err == "" {
+				t.Errorf("%d. %q: unexpected nil statement", i, tt.stmt)
+			} else if rw := rw.String(); tt.rewrite != rw {
+				t.Errorf("%d. %q: unexpected rewrite:\n\nexp=%s\n\ngot=%s\n\n", i, tt.stmt, tt.rewrite, rw)
+			}
 		}
 	}
 }
@@ -787,7 +879,7 @@ func TestTimeRange(t *testing.T) {
 		{expr: `time < 10`, min: `0001-01-01T00:00:00Z`, max: `1970-01-01T00:00:00.000000009Z`},
 
 		// Equality
-		{expr: `time = '2000-01-01 00:00:00'`, min: `2000-01-01T00:00:00Z`, max: `2000-01-01T00:00:00.000000001Z`},
+		{expr: `time = '2000-01-01 00:00:00'`, min: `2000-01-01T00:00:00Z`, max: `2000-01-01T00:00:00Z`},
 
 		// Multiple time expressions.
 		{expr: `time >= '2000-01-01 00:00:00' AND time < '2000-01-02 00:00:00'`, min: `2000-01-01T00:00:00Z`, max: `2000-01-01T23:59:59.999999999Z`},
@@ -796,7 +888,7 @@ func TestTimeRange(t *testing.T) {
 		{expr: `time >= '2000-01-01 00:00:00' AND time <= '1999-01-01 00:00:00'`, min: `2000-01-01T00:00:00Z`, max: `1999-01-01T00:00:00Z`},
 
 		// Absolute time
-		{expr: `time = 1388534400s`, min: `2014-01-01T00:00:00Z`, max: `2014-01-01T00:00:00.000000001Z`},
+		{expr: `time = 1388534400s`, min: `2014-01-01T00:00:00Z`, max: `2014-01-01T00:00:00Z`},
 
 		// Non-comparative expressions.
 		{expr: `time`, min: `0001-01-01T00:00:00Z`, max: `0001-01-01T00:00:00Z`},
@@ -1071,6 +1163,90 @@ func TestEval(t *testing.T) {
 	}
 }
 
+type EvalFixture map[string]map[string]influxql.DataType
+
+func (e EvalFixture) MapType(measurement *influxql.Measurement, field string) influxql.DataType {
+	m := e[measurement.Name]
+	if m == nil {
+		return influxql.Unknown
+	}
+	return m[field]
+}
+
+func TestEvalType(t *testing.T) {
+	for i, tt := range []struct {
+		name string
+		in   string
+		typ  influxql.DataType
+		data EvalFixture
+	}{
+		{
+			name: `a single data type`,
+			in:   `min(value)`,
+			typ:  influxql.Integer,
+			data: EvalFixture{
+				"cpu": map[string]influxql.DataType{
+					"value": influxql.Integer,
+				},
+			},
+		},
+		{
+			name: `multiple data types`,
+			in:   `min(value)`,
+			typ:  influxql.Integer,
+			data: EvalFixture{
+				"cpu": map[string]influxql.DataType{
+					"value": influxql.Integer,
+				},
+				"mem": map[string]influxql.DataType{
+					"value": influxql.String,
+				},
+			},
+		},
+		{
+			name: `count() with a float`,
+			in:   `count(value)`,
+			typ:  influxql.Integer,
+			data: EvalFixture{
+				"cpu": map[string]influxql.DataType{
+					"value": influxql.Float,
+				},
+			},
+		},
+		{
+			name: `mean() with an integer`,
+			in:   `mean(value)`,
+			typ:  influxql.Float,
+			data: EvalFixture{
+				"cpu": map[string]influxql.DataType{
+					"value": influxql.Integer,
+				},
+			},
+		},
+		{
+			name: `value inside a parenthesis`,
+			in:   `(value)`,
+			typ:  influxql.Float,
+			data: EvalFixture{
+				"cpu": map[string]influxql.DataType{
+					"value": influxql.Float,
+				},
+			},
+		},
+	} {
+		sources := make([]influxql.Source, 0, len(tt.data))
+		for src := range tt.data {
+			sources = append(sources, &influxql.Measurement{Name: src})
+		}
+
+		expr := influxql.MustParseExpr(tt.in)
+		typ := influxql.EvalType(expr, sources, tt.data)
+		if typ != tt.typ {
+			t.Errorf("%d. %s: unexpected type:\n\nexp=%#v\n\ngot=%#v\n\n", i, tt.name, tt.typ, typ)
+		}
+	}
+}
+
 // Ensure an expression can be reduced.
 func TestReduce(t *testing.T) {
 	now := mustParseTime("2000-01-01T00:00:00Z")
@@ -1086,6 +1262,10 @@ func TestReduce(t *testing.T) {
 		{in: `foo(bar(2 + 3), 4)`, out: `foo(bar(5), 4)`},
 		{in: `4 / 0`, out: `0.000`},
 		{in: `1 / 2`, out: `0.500`},
+		{in: `2 % 3`, out: `2`},
+		{in: `5 % 2`, out: `1`},
+		{in: `2 % 0`, out: `0`},
+		{in: `2.5 % 0`, out: `NaN`},
 		{in: `4 = 4`, out: `true`},
 		{in: `4 <> 4`, out: `false`},
 		{in: `6 > 4`, out: `true`},
@@ -1336,6 +1516,112 @@ func TestSelect_Privileges(t *testing.T) {
 
 	if !reflect.DeepEqual(exp, got) {
 		t.Errorf("exp: %v, got: %v", exp, got)
+	}
+}
+
+func TestSelect_SubqueryPrivileges(t *testing.T) {
+	stmt := &influxql.SelectStatement{
+		Target: &influxql.Target{
+			Measurement: &influxql.Measurement{Database: "db2"},
+		},
+		Sources: []influxql.Source{
+			&influxql.Measurement{Database: "db0"},
+			&influxql.SubQuery{
+				Statement: &influxql.SelectStatement{
+					Sources: []influxql.Source{
+						&influxql.Measurement{Database: "db1"},
+					},
+				},
+			},
+		},
+	}
+
+	exp := influxql.ExecutionPrivileges{
+		influxql.ExecutionPrivilege{Name: "db0", Privilege: influxql.ReadPrivilege},
+		influxql.ExecutionPrivilege{Name: "db1", Privilege: influxql.ReadPrivilege},
+		influxql.ExecutionPrivilege{Name: "db2", Privilege: influxql.WritePrivilege},
+	}
+
+	got, err := stmt.RequiredPrivileges()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(exp, got) {
+		t.Errorf("exp: %v, got: %v", exp, got)
+	}
+}
+
+func TestShow_Privileges(t *testing.T) {
+	for _, c := range []struct {
+		stmt influxql.Statement
+		exp  influxql.ExecutionPrivileges
+	}{
+		{
+			stmt: &influxql.ShowDatabasesStatement{},
+			exp:  influxql.ExecutionPrivileges{{Admin: false, Privilege: influxql.NoPrivileges}},
+		},
+		{
+			stmt: &influxql.ShowFieldKeysStatement{},
+			exp:  influxql.ExecutionPrivileges{{Admin: false, Privilege: influxql.ReadPrivilege}},
+		},
+		{
+			stmt: &influxql.ShowMeasurementsStatement{},
+			exp:  influxql.ExecutionPrivileges{{Admin: false, Privilege: influxql.ReadPrivilege}},
+		},
+		{
+			stmt: &influxql.ShowQueriesStatement{},
+			exp:  influxql.ExecutionPrivileges{{Admin: false, Privilege: influxql.ReadPrivilege}},
+		},
+		{
+			stmt: &influxql.ShowRetentionPoliciesStatement{},
+			exp:  influxql.ExecutionPrivileges{{Admin: false, Privilege: influxql.ReadPrivilege}},
+		},
+		{
+			stmt: &influxql.ShowSeriesStatement{},
+			exp:  influxql.ExecutionPrivileges{{Admin: false, Privilege: influxql.ReadPrivilege}},
+		},
+		{
+			stmt: &influxql.ShowShardGroupsStatement{},
+			exp:  influxql.ExecutionPrivileges{{Admin: true, Privilege: influxql.AllPrivileges}},
+		},
+		{
+			stmt: &influxql.ShowShardsStatement{},
+			exp:  influxql.ExecutionPrivileges{{Admin: true, Privilege: influxql.AllPrivileges}},
+		},
+		{
+			stmt: &influxql.ShowStatsStatement{},
+			exp:  influxql.ExecutionPrivileges{{Admin: true, Privilege: influxql.AllPrivileges}},
+		},
+		{
+			stmt: &influxql.ShowSubscriptionsStatement{},
+			exp:  influxql.ExecutionPrivileges{{Admin: true, Privilege: influxql.AllPrivileges}},
+		},
+		{
+			stmt: &influxql.ShowDiagnosticsStatement{},
+			exp:  influxql.ExecutionPrivileges{{Admin: true, Privilege: influxql.AllPrivileges}},
+		},
+		{
+			stmt: &influxql.ShowTagKeysStatement{},
+			exp:  influxql.ExecutionPrivileges{{Admin: false, Privilege: influxql.ReadPrivilege}},
+		},
+		{
+			stmt: &influxql.ShowTagValuesStatement{},
+			exp:  influxql.ExecutionPrivileges{{Admin: false, Privilege: influxql.ReadPrivilege}},
+		},
+		{
+			stmt: &influxql.ShowUsersStatement{},
+			exp:  influxql.ExecutionPrivileges{{Admin: true, Privilege: influxql.AllPrivileges}},
+		},
+	} {
+		got, err := c.stmt.RequiredPrivileges()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !reflect.DeepEqual(c.exp, got) {
+			t.Errorf("exp: %v, got: %v", c.exp, got)
+		}
 	}
 }
 

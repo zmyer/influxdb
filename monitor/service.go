@@ -1,3 +1,5 @@
+// Package monitor provides a service and associated functionality
+// for InfluxDB to self-monitor internal statistics and diagnostics.
 package monitor // import "github.com/influxdata/influxdb/monitor"
 
 import (
@@ -14,13 +16,18 @@ import (
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/monitor/diagnostics"
 	"github.com/influxdata/influxdb/services/meta"
-	"go.uber.org/zap"
+	"github.com/uber-go/zap"
 )
 
 // Policy constants.
 const (
-	MonitorRetentionPolicy         = "monitor"
+	// Name of the retention policy used by the monitor service.
+	MonitorRetentionPolicy = "monitor"
+
+	// Duration of the monitor retention policy.
 	MonitorRetentionPolicyDuration = 7 * 24 * time.Hour
+
+	// Default replication factor to set on the monitor retention policy.
 	MonitorRetentionPolicyReplicaN = 1
 )
 
@@ -41,13 +48,10 @@ type Monitor struct {
 	done              chan struct{}
 	storeCreated      bool
 	storeEnabled      bool
-	storeAddress      string
 
-	storeDatabase          string
-	storeRetentionPolicy   string
-	storeRetentionDuration time.Duration
-	storeReplicationFactor int
-	storeInterval          time.Duration
+	storeDatabase        string
+	storeRetentionPolicy string
+	storeInterval        time.Duration
 
 	MetaClient interface {
 		CreateDatabaseWithRetentionPolicy(name string, spec *meta.RetentionPolicySpec) (*meta.DatabaseInfo, error)
@@ -60,7 +64,7 @@ type Monitor struct {
 	Logger zap.Logger
 }
 
-// PointsWriter is a simplified interface for writing the points the monitor gathers
+// PointsWriter is a simplified interface for writing the points the monitor gathers.
 type PointsWriter interface {
 	WritePoints(database, retentionPolicy string, points models.Points) error
 }
@@ -79,6 +83,7 @@ func New(r Reporter, c Config) *Monitor {
 	}
 }
 
+// open returns whether the monitor service is open.
 func (m *Monitor) open() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -153,7 +158,7 @@ func (m *Monitor) SetGlobalTag(key string, value interface{}) {
 	m.mu.Unlock()
 }
 
-// RemoteWriterConfig represents the configuration of a remote writer
+// RemoteWriterConfig represents the configuration of a remote writer.
 type RemoteWriterConfig struct {
 	RemoteAddr string
 	NodeID     string
@@ -176,6 +181,7 @@ func (m *Monitor) SetPointsWriter(pw PointsWriter) error {
 	return m.Open()
 }
 
+// WithLogger sets the logger for the Monitor.
 func (m *Monitor) WithLogger(log zap.Logger) {
 	m.Logger = log.With(zap.String("service", "monitor"))
 }
@@ -448,30 +454,16 @@ func (s *Statistic) ValueNames() []string {
 	return a
 }
 
-// Statistics is a slice of sortable statistics
+// Statistics is a slice of sortable statistics.
 type Statistics []*Statistic
 
+// Len implements sort.Interface.
 func (a Statistics) Len() int { return len(a) }
+
+// Less implements sort.Interface.
 func (a Statistics) Less(i, j int) bool {
 	return a[i].Name < a[j].Name
 }
+
+// Swap implements sort.Interface.
 func (a Statistics) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
-
-// DiagnosticsFromMap returns a Diagnostics from a map.
-func DiagnosticsFromMap(m map[string]interface{}) *diagnostics.Diagnostics {
-	// Display columns in deterministic order.
-	sortedKeys := make([]string, 0, len(m))
-	for k := range m {
-		sortedKeys = append(sortedKeys, k)
-	}
-	sort.Strings(sortedKeys)
-
-	d := diagnostics.NewDiagnostics(sortedKeys)
-	row := make([]interface{}, len(sortedKeys))
-	for i, k := range sortedKeys {
-		row[i] = m[k]
-	}
-	d.AddRow(row)
-
-	return d
-}

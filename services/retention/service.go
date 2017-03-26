@@ -1,3 +1,4 @@
+// Package retention provides the retention policy enforcement service.
 package retention // import "github.com/influxdata/influxdb/services/retention"
 
 import (
@@ -6,7 +7,7 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb/services/meta"
-	"go.uber.org/zap"
+	"github.com/uber-go/zap"
 )
 
 // Service represents the retention policy enforcement service.
@@ -21,7 +22,6 @@ type Service struct {
 		DeleteShard(shardID uint64) error
 	}
 
-	enabled       bool
 	checkInterval time.Duration
 	wg            sync.WaitGroup
 	done          chan struct{}
@@ -55,6 +55,7 @@ func (s *Service) Close() error {
 	return nil
 }
 
+// WithLogger sets the logger on the service.
 func (s *Service) WithLogger(log zap.Logger) {
 	s.logger = log.With(zap.String("service", "retention"))
 }

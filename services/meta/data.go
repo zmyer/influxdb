@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/influxdata/influxdb"
@@ -41,6 +42,10 @@ type Data struct {
 	Databases []DatabaseInfo
 	Users     []UserInfo
 
+	// adminUserExists provides a constant time mechanism for determining
+	// if there is at least one admin user.
+	adminUserExists bool
+
 	MaxShardGroupID uint64
 	MaxShardID      uint64
 }
@@ -71,7 +76,7 @@ func NewShardOwner(s ShardInfo, ownerFreqs map[int]int) (uint64, error) {
 	return uint64(minId), nil
 }
 
-// Database returns a database by name.
+// Database returns a DatabaseInfo by the database name.
 func (data *Data) Database(name string) *DatabaseInfo {
 	for i := range data.Databases {
 		if data.Databases[i].Name == name {
@@ -81,7 +86,7 @@ func (data *Data) Database(name string) *DatabaseInfo {
 	return nil
 }
 
-// CloneDatabases returns a copy of the databases.
+// CloneDatabases returns a copy of the DatabaseInfo.
 func (data *Data) CloneDatabases() []DatabaseInfo {
 	if data.Databases == nil {
 		return nil
@@ -94,7 +99,7 @@ func (data *Data) CloneDatabases() []DatabaseInfo {
 }
 
 // CreateDatabase creates a new database.
-// Returns an error if name is blank or if a database with the same name already exists.
+// It returns an error if name is blank or if a database with the same name already exists.
 func (data *Data) CreateDatabase(name string) error {
 	if name == "" {
 		return ErrDatabaseNameRequired
@@ -141,7 +146,7 @@ func (data *Data) RetentionPolicy(database, name string) (*RetentionPolicyInfo, 
 }
 
 // CreateRetentionPolicy creates a new retention policy on a database.
-// Returns an error if name is blank or if a database does not exist.
+// It returns an error if name is blank or if the database does not exist.
 func (data *Data) CreateRetentionPolicy(database string, rpi *RetentionPolicyInfo, makeDefault bool) error {
 	// Validate retention policy.
 	if rpi == nil {
@@ -216,16 +221,16 @@ type RetentionPolicyUpdate struct {
 	ShardGroupDuration *time.Duration
 }
 
-// SetName sets the RetentionPolicyUpdate.Name
+// SetName sets the RetentionPolicyUpdate.Name.
 func (rpu *RetentionPolicyUpdate) SetName(v string) { rpu.Name = &v }
 
-// SetDuration sets the RetentionPolicyUpdate.Duration
+// SetDuration sets the RetentionPolicyUpdate.Duration.
 func (rpu *RetentionPolicyUpdate) SetDuration(v time.Duration) { rpu.Duration = &v }
 
-// SetReplicaN sets the RetentionPolicyUpdate.ReplicaN
+// SetReplicaN sets the RetentionPolicyUpdate.ReplicaN.
 func (rpu *RetentionPolicyUpdate) SetReplicaN(v int) { rpu.ReplicaN = &v }
 
-// SetShardGroupDuration sets the RetentionPolicyUpdate.ShardGroupDuration
+// SetShardGroupDuration sets the RetentionPolicyUpdate.ShardGroupDuration.
 func (rpu *RetentionPolicyUpdate) SetShardGroupDuration(v time.Duration) { rpu.ShardGroupDuration = &v }
 
 // UpdateRetentionPolicy updates an existing retention policy.
@@ -314,7 +319,7 @@ func (data *Data) DropShard(id uint64) {
 	}
 }
 
-// ShardGroups returns a list of all shard groups on a database and policy.
+// ShardGroups returns a list of all shard groups on a database and retention policy.
 func (data *Data) ShardGroups(database, policy string) ([]ShardGroupInfo, error) {
 	// Find retention policy.
 	rpi, err := data.RetentionPolicy(database, policy)
@@ -472,7 +477,7 @@ func (data *Data) DropContinuousQuery(database, name string) error {
 	return ErrContinuousQueryNotFound
 }
 
-// validateURL returns an error if the URL does not have a port or uses a scheme other than UDP or TCP.
+// validateURL returns an error if the URL does not have a port or uses a scheme other than UDP or HTTP.
 func validateURL(input string) error {
 	u, err := url.Parse(input)
 	if err != nil {
@@ -567,6 +572,11 @@ func (data *Data) CreateUser(name, hash string, admin bool) error {
 		Admin: admin,
 	})
 
+	// We know there is now at least one admin user.
+	if admin {
+		data.adminUserExists = true
+	}
+
 	return nil
 }
 
@@ -574,10 +584,17 @@ func (data *Data) CreateUser(name, hash string, admin bool) error {
 func (data *Data) DropUser(name string) error {
 	for i := range data.Users {
 		if data.Users[i].Name == name {
+			wasAdmin := data.Users[i].Admin
 			data.Users = append(data.Users[:i], data.Users[i+1:]...)
+
+			// Maybe we dropped the only admin user?
+			if wasAdmin {
+				data.adminUserExists = data.hasAdminUser()
+			}
 			return nil
 		}
 	}
+
 	return ErrUserNotFound
 }
 
@@ -592,7 +609,7 @@ func (data *Data) UpdateUser(name, hash string) error {
 	return ErrUserNotFound
 }
 
-// CloneUsers returns a copy of the user infos
+// CloneUsers returns a copy of the user infos.
 func (data *Data) CloneUsers() []UserInfo {
 	if len(data.Users) == 0 {
 		return []UserInfo{}
@@ -629,7 +646,15 @@ func (data *Data) SetAdminPrivilege(name string, admin bool) error {
 
 	ui.Admin = admin
 
+	// We could have promoted or revoked the only admin. Check if an admin
+	// user exists.
+	data.adminUserExists = data.hasAdminUser()
 	return nil
+}
+
+// AdminUserExists returns true if an admin user exists.
+func (data Data) AdminUserExists() bool {
+	return data.adminUserExists
 }
 
 // UserPrivileges gets the privileges for a user.
@@ -668,7 +693,7 @@ func (data *Data) Clone() *Data {
 	return &other
 }
 
-// marshal serializes to a protobuf representation.
+// marshal serializes data to a protobuf representation.
 func (data *Data) marshal() *internal.Data {
 	pb := &internal.Data{
 		Term:      proto.Uint64(data.Term),
@@ -713,6 +738,10 @@ func (data *Data) unmarshal(pb *internal.Data) {
 	for i, x := range pb.GetUsers() {
 		data.Users[i].unmarshal(x)
 	}
+
+	// Exhaustively determine if there is an admin user. The marshalled cache
+	// value may not be correct.
+	data.adminUserExists = data.hasAdminUser()
 }
 
 // MarshalBinary encodes the metadata to a binary format.
@@ -730,6 +759,17 @@ func (data *Data) UnmarshalBinary(buf []byte) error {
 	return nil
 }
 
+// hasAdminUser exhaustively checks for the presence of at least one admin
+// user.
+func (data *Data) hasAdminUser() bool {
+	for _, u := range data.Users {
+		if u.Admin {
+			return true
+		}
+	}
+	return false
+}
+
 // NodeInfo represents information about a single node in the cluster.
 type NodeInfo struct {
 	ID      uint64
@@ -737,30 +777,16 @@ type NodeInfo struct {
 	TCPHost string
 }
 
-// clone returns a deep copy of ni.
-func (ni NodeInfo) clone() NodeInfo { return ni }
-
-// marshal serializes to a protobuf representation.
-func (ni NodeInfo) marshal() *internal.NodeInfo {
-	pb := &internal.NodeInfo{}
-	pb.ID = proto.Uint64(ni.ID)
-	pb.Host = proto.String(ni.Host)
-	pb.TCPHost = proto.String(ni.TCPHost)
-	return pb
-}
-
-// unmarshal deserializes from a protobuf representation.
-func (ni *NodeInfo) unmarshal(pb *internal.NodeInfo) {
-	ni.ID = pb.GetID()
-	ni.Host = pb.GetHost()
-	ni.TCPHost = pb.GetTCPHost()
-}
-
 // NodeInfos is a slice of NodeInfo used for sorting
 type NodeInfos []NodeInfo
 
-func (n NodeInfos) Len() int           { return len(n) }
-func (n NodeInfos) Swap(i, j int)      { n[i], n[j] = n[j], n[i] }
+// Len implements sort.Interface.
+func (n NodeInfos) Len() int { return len(n) }
+
+// Swap implements sort.Interface.
+func (n NodeInfos) Swap(i, j int) { n[i], n[j] = n[j], n[i] }
+
+// Less implements sort.Interface.
 func (n NodeInfos) Less(i, j int) bool { return n[i].ID < n[j].ID }
 
 // DatabaseInfo represents information about a database in the system.
@@ -903,10 +929,7 @@ func (s *RetentionPolicySpec) Matches(rpi *RetentionPolicyInfo) bool {
 	// Normalize with the retention policy info's duration instead of the spec
 	// since they should be the same and we're performing a comparison.
 	sgDuration := normalisedShardDuration(s.ShardGroupDuration, rpi.Duration)
-	if sgDuration != rpi.ShardGroupDuration {
-		return false
-	}
-	return true
+	return sgDuration == rpi.ShardGroupDuration
 }
 
 // marshal serializes to a protobuf representation.
@@ -970,7 +993,8 @@ type RetentionPolicyInfo struct {
 	Subscriptions      []SubscriptionInfo
 }
 
-// NewRetentionPolicyInfo returns a new instance of RetentionPolicyInfo with defaults set.
+// NewRetentionPolicyInfo returns a new instance of RetentionPolicyInfo
+// with default replication and duration.
 func NewRetentionPolicyInfo(name string) *RetentionPolicyInfo {
 	return &RetentionPolicyInfo{
 		Name:     name,
@@ -979,7 +1003,8 @@ func NewRetentionPolicyInfo(name string) *RetentionPolicyInfo {
 	}
 }
 
-// DefaultRetentionPolicyInfo returns a new instance of RetentionPolicyInfo with defaults set.
+// DefaultRetentionPolicyInfo returns a new instance of RetentionPolicyInfo
+// with default name, replication, and duration.
 func DefaultRetentionPolicyInfo() *RetentionPolicyInfo {
 	return NewRetentionPolicyInfo(DefaultRetentionPolicyName)
 }
@@ -1005,7 +1030,8 @@ func (rpi *RetentionPolicyInfo) Apply(spec *RetentionPolicySpec) *RetentionPolic
 	return rp
 }
 
-// ShardGroupByTimestamp returns the shard group in the policy that contains the timestamp.
+// ShardGroupByTimestamp returns the shard group in the policy that contains the timestamp,
+// or nil if no shard group matches.
 func (rpi *RetentionPolicyInfo) ShardGroupByTimestamp(timestamp time.Time) *ShardGroupInfo {
 	for i := range rpi.ShardGroups {
 		sgi := &rpi.ShardGroups[i]
@@ -1114,7 +1140,7 @@ func (rpi *RetentionPolicyInfo) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
-// shardGroupDuration returns the duration for a shard group based on a policy duration.
+// shardGroupDuration returns the default duration for a shard group based on a policy duration.
 func shardGroupDuration(d time.Duration) time.Duration {
 	if d >= 180*24*time.Hour || d == 0 { // 6 months or 0
 		return 7 * 24 * time.Hour
@@ -1155,8 +1181,13 @@ type ShardGroupInfo struct {
 // on the StartTime field.
 type ShardGroupInfos []ShardGroupInfo
 
-func (a ShardGroupInfos) Len() int      { return len(a) }
+// Len implements sort.Interface.
+func (a ShardGroupInfos) Len() int { return len(a) }
+
+// Swap implements sort.Interface.
 func (a ShardGroupInfos) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
+
+// Less implements sort.Interface.
 func (a ShardGroupInfos) Less(i, j int) bool {
 	iEnd := a[i].EndTime
 	if a[i].Truncated() {
@@ -1175,12 +1206,12 @@ func (a ShardGroupInfos) Less(i, j int) bool {
 	return iEnd.Before(jEnd)
 }
 
-// Contains return true if the shard group contains data for the timestamp.
+// Contains returns true if the shard group contains data for the timestamp.
 func (sgi *ShardGroupInfo) Contains(timestamp time.Time) bool {
 	return !sgi.StartTime.After(timestamp) && sgi.EndTime.After(timestamp)
 }
 
-// Overlaps return whether the shard group contains data for the time range between min and max
+// Overlaps returns whether the shard group contains data for the time range between min and max
 func (sgi *ShardGroupInfo) Overlaps(min, max time.Time) bool {
 	return !sgi.StartTime.After(max) && sgi.EndTime.After(min)
 }
@@ -1190,7 +1221,7 @@ func (sgi *ShardGroupInfo) Deleted() bool {
 	return !sgi.DeletedAt.IsZero()
 }
 
-// Truncated returns true if this ShardGroup has been truncated (no new writes)
+// Truncated returns true if this ShardGroup has been truncated (no new writes).
 func (sgi *ShardGroupInfo) Truncated() bool {
 	return !sgi.TruncatedAt.IsZero()
 }
@@ -1209,7 +1240,7 @@ func (sgi ShardGroupInfo) clone() ShardGroupInfo {
 	return other
 }
 
-// ShardFor returns the ShardInfo for a Point hash
+// ShardFor returns the ShardInfo for a Point hash.
 func (sgi *ShardGroupInfo) ShardFor(hash uint64) ShardInfo {
 	return sgi.Shards[hash%uint64(len(sgi.Shards))]
 }
@@ -1238,8 +1269,16 @@ func (sgi *ShardGroupInfo) marshal() *internal.ShardGroupInfo {
 // unmarshal deserializes from a protobuf representation.
 func (sgi *ShardGroupInfo) unmarshal(pb *internal.ShardGroupInfo) {
 	sgi.ID = pb.GetID()
-	sgi.StartTime = UnmarshalTime(pb.GetStartTime())
-	sgi.EndTime = UnmarshalTime(pb.GetEndTime())
+	if i := pb.GetStartTime(); i == 0 {
+		sgi.StartTime = time.Unix(0, 0).UTC()
+	} else {
+		sgi.StartTime = UnmarshalTime(i)
+	}
+	if i := pb.GetEndTime(); i == 0 {
+		sgi.EndTime = time.Unix(0, 0).UTC()
+	} else {
+		sgi.EndTime = UnmarshalTime(i)
+	}
 	sgi.DeletedAt = UnmarshalTime(pb.GetDeletedAt())
 
 	if pb != nil && pb.TruncatedAt != nil {
@@ -1328,7 +1367,7 @@ func (si *ShardInfo) unmarshal(pb *internal.ShardInfo) {
 	}
 }
 
-// SubscriptionInfo hold the subscription information
+// SubscriptionInfo holds the subscription information.
 type SubscriptionInfo struct {
 	Name         string
 	Mode         string
@@ -1409,15 +1448,24 @@ func (cqi *ContinuousQueryInfo) unmarshal(pb *internal.ContinuousQueryInfo) {
 
 // UserInfo represents metadata about a user in the system.
 type UserInfo struct {
-	Name       string
-	Hash       string
-	Admin      bool
+	// User's name.
+	Name string
+
+	// Hashed password.
+	Hash string
+
+	// Whether the user is an admin, i.e. allowed to do everything.
+	Admin bool
+
+	// Map of database name to granted privilege.
 	Privileges map[string]influxql.Privilege
 }
 
-// Authorize returns true if the user is authorized and false if not.
-func (ui *UserInfo) Authorize(privilege influxql.Privilege, database string) bool {
-	if ui.Admin {
+var _ influxql.Authorizer = (*UserInfo)(nil)
+
+// AuthorizeDatabase returns true if the user is authorized for the given privilege on the given database.
+func (ui *UserInfo) AuthorizeDatabase(privilege influxql.Privilege, database string) bool {
+	if ui.Admin || privilege == influxql.NoPrivileges {
 		return true
 	}
 	p, ok := ui.Privileges[database]
@@ -1468,18 +1516,21 @@ func (ui *UserInfo) unmarshal(pb *internal.UserInfo) {
 	}
 }
 
+// Lease represents a lease held on a resource.
 type Lease struct {
 	Name       string    `json:"name"`
 	Expiration time.Time `json:"expiration"`
 	Owner      uint64    `json:"owner"`
 }
 
+// Leases is a concurrency-safe collection of leases keyed by name.
 type Leases struct {
 	mu sync.Mutex
 	m  map[string]*Lease
 	d  time.Duration
 }
 
+// NewLeases returns a new instance of Leases.
 func NewLeases(d time.Duration) *Leases {
 	return &Leases{
 		m: make(map[string]*Lease),
@@ -1487,6 +1538,10 @@ func NewLeases(d time.Duration) *Leases {
 	}
 }
 
+// Acquire acquires a lease with the given name for the given nodeID.
+// If the lease doesn't exist or exists but is expired, a valid lease is returned.
+// If nodeID already owns the named and unexpired lease, the lease expiration is extended.
+// If a different node owns the lease, an error is returned.
 func (leases *Leases) Acquire(name string, nodeID uint64) (*Lease, error) {
 	leases.mu.Lock()
 	defer leases.mu.Unlock()
@@ -1527,4 +1582,18 @@ func UnmarshalTime(v int64) time.Time {
 		return time.Time{}
 	}
 	return time.Unix(0, v).UTC()
+}
+
+// ValidName checks to see if the given name can would be valid for DB/RP name
+func ValidName(name string) bool {
+	for _, r := range name {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+
+	return name != "" &&
+		name != "." &&
+		name != ".." &&
+		!strings.ContainsAny(name, `/\`)
 }

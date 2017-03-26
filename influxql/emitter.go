@@ -7,7 +7,7 @@ import (
 	"github.com/influxdata/influxdb/models"
 )
 
-// Emitter groups values together by name,
+// Emitter groups values together by name, tags, and time.
 type Emitter struct {
 	buf       []Point
 	itrs      []Iterator
@@ -126,11 +126,10 @@ func (e *Emitter) loadBuf() (t int64, name string, tags Tags, err error) {
 		}
 
 		// Update range values if higher and emitter is in time descending order.
-		if (itrName < name) || (itrName == name && itrTags.ID() < tags.ID()) || (itrName == name && itrTags.ID() == tags.ID() && itrTime < t) {
+		if (itrName > name) || (itrName == name && itrTags.ID() > tags.ID()) || (itrName == name && itrTags.ID() == tags.ID() && itrTime > t) {
 			t, name, tags = itrTime, itrName, itrTags
 		}
 	}
-
 	return
 }
 
@@ -148,7 +147,6 @@ func (e *Emitter) createRow(name string, tags Tags, values []interface{}) {
 // readAt returns the next slice of values from the iterators at time/name/tags.
 // Returns nil values once the iterators are exhausted.
 func (e *Emitter) readAt(t int64, name string, tags Tags) []interface{} {
-	// If time is included then move colums over by one.
 	offset := 1
 	if e.OmitTime {
 		offset = 0
@@ -158,29 +156,31 @@ func (e *Emitter) readAt(t int64, name string, tags Tags) []interface{} {
 	if !e.OmitTime {
 		values[0] = time.Unix(0, t).UTC()
 	}
+	e.readInto(t, name, tags, values[offset:])
+	return values
+}
 
+func (e *Emitter) readInto(t int64, name string, tags Tags, values []interface{}) {
 	for i, p := range e.buf {
 		// Skip if buffer is empty.
 		if p == nil {
-			values[i+offset] = nil
+			values[i] = nil
 			continue
 		}
 
 		// Skip point if it doesn't match time/name/tags.
 		pTags := p.tags()
 		if p.time() != t || p.name() != name || !pTags.Equals(&tags) {
-			values[i+offset] = nil
+			values[i] = nil
 			continue
 		}
 
 		// Read point value.
-		values[i+offset] = p.value()
+		values[i] = p.value()
 
 		// Clear buffer.
 		e.buf[i] = nil
 	}
-
-	return values
 }
 
 // readIterator reads the next point from itr.

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -89,16 +88,7 @@ func TestHandler_Query_Auth(t *testing.T) {
 	h := NewHandler(true)
 
 	// Set mock meta client functions for the handler to use.
-	h.MetaClient.UsersFn = func() []meta.UserInfo {
-		return []meta.UserInfo{
-			{
-				Name:       "user1",
-				Hash:       "abcd",
-				Admin:      true,
-				Privileges: make(map[string]influxql.Privilege),
-			},
-		}
-	}
+	h.MetaClient.AdminUserExistsFn = func() bool { return true }
 
 	h.MetaClient.UserFn = func(username string) (*meta.UserInfo, error) {
 		if username != "user1" {
@@ -356,8 +346,10 @@ func TestHandler_Query_ErrAuthorize(t *testing.T) {
 	h.QueryAuthorizer.AuthorizeQueryFn = func(u *meta.UserInfo, q *influxql.Query, db string) error {
 		return errors.New("marker")
 	}
-	h.MetaClient.UsersFn = func() []meta.UserInfo {
-		return []meta.UserInfo{
+	h.MetaClient.AdminUserExistsFn = func() bool { return true }
+	h.MetaClient.AuthenticateFn = func(u, p string) (*meta.UserInfo, error) {
+
+		users := []meta.UserInfo{
 			{
 				Name:  "admin",
 				Hash:  "admin",
@@ -371,9 +363,8 @@ func TestHandler_Query_ErrAuthorize(t *testing.T) {
 				},
 			},
 		}
-	}
-	h.MetaClient.AuthenticateFn = func(u, p string) (*meta.UserInfo, error) {
-		for _, user := range h.MetaClient.Users() {
+
+		for _, user := range users {
 			if u == user.Name {
 				if p == user.Hash {
 					return &user, nil
@@ -611,10 +602,6 @@ func TestHandler_XForwardedFor(t *testing.T) {
 	}
 }
 
-type invalidJSON struct{}
-
-func (*invalidJSON) MarshalJSON() ([]byte, error) { return nil, errors.New("marker") }
-
 // NewHandler represents a test wrapper for httpd.Handler.
 type Handler struct {
 	*httpd.Handler
@@ -642,11 +629,11 @@ func NewHandler(requireAuthentication bool) *Handler {
 
 // HandlerMetaStore is a mock implementation of Handler.MetaClient.
 type HandlerMetaStore struct {
-	PingFn         func(d time.Duration) error
-	DatabaseFn     func(name string) *meta.DatabaseInfo
-	AuthenticateFn func(username, password string) (ui *meta.UserInfo, err error)
-	UsersFn        func() []meta.UserInfo
-	UserFn         func(username string) (*meta.UserInfo, error)
+	PingFn            func(d time.Duration) error
+	DatabaseFn        func(name string) *meta.DatabaseInfo
+	AuthenticateFn    func(username, password string) (ui *meta.UserInfo, err error)
+	UserFn            func(username string) (*meta.UserInfo, error)
+	AdminUserExistsFn func() bool
 }
 
 func (s *HandlerMetaStore) Ping(b bool) error {
@@ -665,8 +652,8 @@ func (s *HandlerMetaStore) Authenticate(username, password string) (ui *meta.Use
 	return s.AuthenticateFn(username, password)
 }
 
-func (s *HandlerMetaStore) Users() []meta.UserInfo {
-	return s.UsersFn()
+func (s *HandlerMetaStore) AdminUserExists() bool {
+	return s.AdminUserExistsFn()
 }
 
 func (s *HandlerMetaStore) User(username string) (*meta.UserInfo, error) {
@@ -705,21 +692,6 @@ func MustNewJSONRequest(method, urlStr string, body io.Reader) *http.Request {
 	r := MustNewRequest(method, urlStr, body)
 	r.Header.Set("Accept", "application/json")
 	return r
-}
-
-// matchRegex returns true if a s matches pattern.
-func matchRegex(pattern, s string) bool {
-	return regexp.MustCompile(pattern).MatchString(s)
-}
-
-// NewResultChan returns a channel that sends all results and then closes.
-func NewResultChan(results ...*influxql.Result) <-chan *influxql.Result {
-	ch := make(chan *influxql.Result, len(results))
-	for _, r := range results {
-		ch <- r
-	}
-	close(ch)
-	return ch
 }
 
 // MustJWTToken returns a new JWT token and signed string or panics trying.
